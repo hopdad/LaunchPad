@@ -4,122 +4,8 @@ from math import ceil
 import io
 from fpdf import FPDF
 from datetime import datetime
-import easyocr
-import pytesseract
-from PIL import Image
-import pdf2image
-import numpy as np
-import cv2
-import sqlite3
-
-# DB Connection
-conn = sqlite3.connect('peddle_data.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS store_summaries (date TEXT, store TEXT, total REAL, diff REAL)''')
-c.execute('''CREATE TABLE IF NOT EXISTS dept_cubes (date TEXT, store TEXT, dept TEXT, cube REAL)''')
-c.execute('''CREATE TABLE IF NOT EXISTS peddle_runs (date TEXT, run INTEGER, time TEXT, stores TEXT, carrier TEXT, total_cube REAL, second_trailer TEXT, fit_note TEXT)''')
-conn.commit()
-
-# Function to preprocess image with OpenCV (with deskewing)
-def preprocess_image(img):
-    if isinstance(img, Image.Image):
-        img = np.array(img)
-    
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=100, maxLineGap=10)
-    
-    if lines is not None:
-        angles = []
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
-            angles.append(angle)
-        
-        skew_angle = np.median(angles)
-        if abs(skew_angle) < 45:
-            (h, w) = gray.shape[:2]
-            center = (w // 2, h // 2)
-            M = cv2.getRotationMatrix2D(center, skew_angle, 1.0)
-            deskewed = cv2.warpAffine(blurred, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        else:
-            deskewed = blurred
-    else:
-        deskewed = blurred
-    
-    thresh = cv2.adaptiveThreshold(deskewed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-    
-    kernel = np.ones((3, 3), np.uint8)
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
-    
-    return dilated
-
-# Function to parse OCR results into structured data
-def parse_ocr_results(results, departments, stores):
-    sorted_results = sorted(results, key=lambda r: (r[0][0][1], r[0][0][0]))
-    
-    rows = []
-    current_row = []
-    prev_y = None
-    y_threshold = 30
-    for bbox, text, conf in sorted_results:
-        y = bbox[0][1]
-        if prev_y is None or abs(y - prev_y) < y_threshold:
-            current_row.append((bbox, text, conf))
-        else:
-            if current_row:
-                rows.append(sorted(current_row, key=lambda item: item[0][0][0]))
-            current_row = [(bbox, text, conf)]
-        prev_y = y
-    if current_row:
-        rows.append(sorted(current_row, key=lambda item: item[0][0][0]))
-    
-    data = []
-    known_stores = set(stores)
-    dept_map = {dept.lower(): dept for dept in departments}
-    current_store = None
-    row_dict = {}
-    
-    for row in rows:
-        texts = [item[1].strip() for item in row]
-        if not texts:
-            continue
-        
-        potential_store = texts[0]
-        if potential_store.isdigit() and 1 <= len(potential_store) <= 4 and potential_store in known_stores:
-            if current_store:
-                data.append(row_dict)
-            current_store = potential_store
-            row_dict = {"STORE": current_store}
-            dept_idx = 0
-            for text in texts[1:]:
-                if text.replace('.', '').isdigit() and dept_idx < len(departments):
-                    row_dict[departments[dept_idx]] = float(text)
-                    dept_idx += 1
-                elif text.lower() in dept_map:
-                    continue
-        elif current_store:
-            pass
-    
-    if current_store:
-        data.append(row_dict)
-    
-    extracted = {d["STORE"]: d for d in data if "STORE" in d}
-    final_data = []
-    for store in stores:
-        if store in extracted:
-            row = extracted[store]
-        else:
-            row = {"STORE": store}
-            for dept in departments:
-                row[dept] = 0.0
-            st.warning(f"Store {store} not found in scan; defaulting to 0 cubes.")
-        final_data.append(row)
-    
-    return final_data
+from utils import preprocess_image, parse_ocr_results
+from db_utils import get_db_connection, save_data_to_db, fetch_historical_data
 
 # App Title
 st.title("Peddle Sheet Generator")
@@ -376,42 +262,22 @@ with tab3:
         st.download_button("Download Data as Excel", output, file_name="ped_data.xlsx")
         
         if st.button("Save to DB"):
-            date_str = date.strftime('%Y-%m-%d')
-            
-            for _, row in df.iterrows():
-                c.execute("INSERT INTO store_summaries VALUES (?, ?, ?, ?)",
-                          (date_str, row['STORE'], row['TOTAL'], row['DIFF']))
-                for dept in departments:
-                    if dept in row:
-                        c.execute("INSERT INTO dept_cubes VALUES (?, ?, ?, ?)",
-                                  (date_str, row['STORE'], dept, row[dept]))
-            
-            for _, run in runs_df.iterrows():
-                c.execute("INSERT INTO peddle_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                          (date_str, run['Run'], run.get('Time', ''), run['Stores'], run['Carrier'], run['Total Cube'], run['Second Trailer'], run.get('Fit Note', '')))
-            
-            conn.commit()
+            save_data_to_db(df, departments, runs_df, date, conn, c)
             st.success("Data saved to database!")
 
 with tab4:
     st.header("Historical Data")
     query_date = st.date_input("View Data For", datetime.today())
-    date_str = query_date.strftime('%Y-%m-%d')
+    summaries, runs, totals = fetch_historical_data(query_date, c)
     
-    c.execute("SELECT * FROM store_summaries WHERE date = ?", (date_str,))
-    summaries = pd.DataFrame(c.fetchall(), columns=['Date', 'Store', 'Total', 'Diff'])
     if not summaries.empty:
         st.subheader("Store Summaries")
         st.dataframe(summaries)
     
-    c.execute("SELECT * FROM peddle_runs WHERE date = ?", (date_str,))
-    runs = pd.DataFrame(c.fetchall(), columns=['Date', 'Run', 'Time', 'Stores', 'Carrier', 'Total Cube', 'Second Trailer', 'Fit Note'])
     if not runs.empty:
         st.subheader("Peddle Runs")
         st.dataframe(runs)
     
-    c.execute("SELECT date, SUM(total) FROM store_summaries GROUP BY date")
-    totals = pd.DataFrame(c.fetchall(), columns=['Date', 'Total Cube'])
     if not totals.empty:
         st.subheader("Cube Trends")
         st.line_chart(totals.set_index('Date'))
