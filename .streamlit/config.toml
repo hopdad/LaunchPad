@@ -1,0 +1,7 @@
+[theme]
+base = "dark"  # Sets the overall dark mode
+primaryColor = "#DD1321"  # Meijer red for buttons, accents, highlights
+backgroundColor = "#1E1E1E"  # Deep gray-black for main bg (warehouse feel)
+secondaryBackgroundColor = "#2A2A2A"  # Slightly lighter for sidebars/tabs
+textColor = "#FFFFFF"  # White text for readability
+font = "sans serif"  # Clean, modern font
