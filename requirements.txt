@@ -1,0 +1,10 @@
+streamlit
+pandas
+fpdf
+easyocr
+pytesseract
+pillow
+pdf2image
+numpy
+opencv-python-headless
+openpyxl
