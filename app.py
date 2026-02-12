@@ -7,6 +7,13 @@ from fpdf import FPDF
 from datetime import datetime
 from utils import preprocess_image, parse_ocr_results
 from db_utils import get_db_connection, save_data_to_db, fetch_historical_data
+import streamlit as st
+
+password = st.text_input("Enter Password", type="password")
+if password != "your_secret_password":  # Replace with your chosen password
+    st.error("Incorrect password.")
+    st.stop()
+
 
 # App Title
 st.title("Peddle Sheet Generator")
