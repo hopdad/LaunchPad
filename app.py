@@ -73,13 +73,33 @@ user_role = credentials["usernames"][username]["role"]
 st.title("Peddle Sheet Generator")
 st.write("Streamlit-powered web app for daily peddle planning. Access via browser—no installs needed.")
 
-# Sidebar Config
+# Sidebar
 with st.sidebar:
     st.image("logo.jpg", use_container_width=True)
     st.divider()
+    authenticator.logout(button_name="Logout", location="main")
 
-    st.header("Configuration")
-    departments_raw = st.text_input("Departments (e.g., 882,883,MB)", value="882,883,MB")
+# Hardcoded cube per pallet
+pallet_cube = 50
+
+# Main Tabs (Conditional on Role)
+tabs = ["Settings", "Data Entry", "Summary & Planning", "Actuals", "Outputs"]
+if user_role == "admin":
+    tabs.append("History")
+
+selected_tabs = st.tabs(tabs)
+
+settings_tab = selected_tabs[0]
+data_entry_tab = selected_tabs[1]
+summary_planning_tab = selected_tabs[2]
+actuals_tab = selected_tabs[3]
+outputs_tab = selected_tabs[4]
+history_tab = selected_tabs[5] if user_role == "admin" else None
+
+with settings_tab:
+    st.header("Settings")
+
+    departments_raw = st.text_input("Departments (comma-separated)", value="882,883,MB")
     departments = [d.strip() for d in departments_raw.split(",") if d.strip()]
     if not departments:
         st.error("Enter at least one department.")
@@ -100,23 +120,7 @@ with st.sidebar:
         st.warning("Add at least one store to get started.")
 
     trailer_capacity = st.number_input("Trailer Capacity", value=1600, min_value=1)
-    pallet_cube = st.number_input("Cube per Pallet", value=50, min_value=1)
-
-    st.divider()
-    authenticator.logout(button_name="Logout", location="main")
-
-# Main Tabs (Conditional on Role)
-tabs = ["Data Entry", "Summary & Planning", "Actuals", "Outputs"]
-if user_role == "admin":
-    tabs.append("History")
-
-selected_tabs = st.tabs(tabs)
-
-data_entry_tab = selected_tabs[0]
-summary_planning_tab = selected_tabs[1]
-actuals_tab = selected_tabs[2]
-outputs_tab = selected_tabs[3]
-history_tab = selected_tabs[4] if user_role == "admin" else None
+    fluff = st.selectbox("Fluff (extra cube buffer)", options=[50, 100, 150, 200, 250], index=0)
 
 with data_entry_tab:
     st.header("Cube Data Entry")
@@ -264,12 +268,15 @@ with summary_planning_tab:
     if not df.empty:
         try:
             total_cube = df["TOTAL"].sum()
+            total_cube_with_fluff = total_cube + fluff
             pallet_count = ceil(total_cube / pallet_cube)
-            trailer_goal = total_cube / trailer_capacity
+            trailer_goal = total_cube_with_fluff / trailer_capacity
             probable_trailers = ceil(trailer_goal * 1.1)
-            
+
             st.header("Summary")
             st.write(f"**Total Cube:** {total_cube:.2f}")
+            st.write(f"**Fluff:** {fluff}")
+            st.write(f"**Total Cube (with fluff):** {total_cube_with_fluff:.2f}")
             st.write(f"**Pallet Count:** {pallet_count}")
             st.write(f"**Trailer Goal:** {trailer_goal:.2f}")
             st.write(f"**Probable Trailers:** {probable_trailers}")
@@ -352,8 +359,9 @@ with outputs_tab:
     if not df.empty:
         date = st.date_input("Sheet Date", datetime.today())
         total_cube = df["TOTAL"].sum()
+        total_cube_with_fluff = total_cube + fluff
         pallet_count = ceil(total_cube / pallet_cube)
-        trailer_goal = total_cube / trailer_capacity
+        trailer_goal = total_cube_with_fluff / trailer_capacity
         probable_trailers = ceil(trailer_goal * 1.1)
         if st.button("Generate PDF Sheet"):
             try:
