@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 from math import ceil
@@ -7,40 +6,74 @@ from fpdf import FPDF
 from datetime import datetime
 from utils import preprocess_image, parse_ocr_results
 from db_utils import get_db_connection, save_data_to_db, fetch_historical_data
-import streamlit as st
+import streamlit_authenticator as stauth  # New import
 
-password = st.text_input("Enter Password", type="password")
-if password != "your_secret_password":  # Replace with your chosen password
-    st.error("Incorrect password.")
+# Auth Setup (hardcoded for now; use secrets.toml in prod)
+credentials = {
+    "usernames": {
+        "clerk1": {
+            "name": "Clerk User",
+            "password": stauth.Hasher(["pass123"]).generate()[0],  # Hashed password
+            "role": "clerk"
+        },
+        "clerk2": {
+            "name": "Clerk User 2",
+            "password": stauth.Hasher(["pass456"]).generate()[0],
+            "role": "clerk"
+        },
+        "admin1": {
+            "name": "Admin User",
+            "password": stauth.Hasher(["adminpass"]).generate()[0],
+            "role": "admin"
+        },
+        "manager1": {
+            "name": "Manager User",
+            "password": stauth.Hasher(["managerpass"]).generate()[0],
+            "role": "admin"  # Same as admin for History access
+        }
+    }
+}
+
+authenticator = stauth.Authenticate(
+    credentials,
+    cookie_name="peddle_app",
+    key="auth_key",
+    cookie_expiry_days=30
+)
+
+# Login Form
+name, authentication_status, username = authenticator.login("Login", "main")
+
+if authentication_status is False:
+    st.error("Username/password is incorrect")
+    st.stop()
+elif authentication_status is None:
+    st.warning("Please enter your username and password")
     st.stop()
 
+# Logged In Successfully
+st.success(f"Welcome, {name}! ({credentials['usernames'][username]['role'].capitalize()})")
+authenticator.logout("Logout", "sidebar")  # Logout in sidebar
+
+# Get User Role
+user_role = credentials["usernames"][username]["role"]
 
 # App Title
 st.title("Peddle Sheet Generator")
 st.write("Streamlit-powered web app for daily peddle planning. Access via browser—no installs needed.")
 
-# Sidebar Config
+# Sidebar Config (unchanged)
 with st.sidebar:
     st.header("Configuration")
-    departments_input = st.text_input("Departments (e.g., 882,883,MB)", value="882,883,MB")
-    try:
-        departments = [d.strip() for d in departments_input.split(",") if d.strip()]
-        if not departments:
-            raise ValueError("No departments provided.")
-    except Exception as e:
-        st.error(f"Error parsing departments: {e}")
-        departments = []
-
+    departments = st.text_input("Departments (e.g., 882,883,MB)", value="882,883,MB").split(",")
+    departments = [d.strip() for d in departments]
+    
     store_input_method = st.radio("Add Stores", ("Manual", "Upload List"))
-    stores = []
     if store_input_method == "Upload List":
         store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"])
         if store_file:
-            try:
-                stores_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
-                stores = stores_df.iloc[:, 0].astype(str).tolist()
-            except Exception as e:
-                st.error(f"Error loading store list: {e}")
+            stores_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
+            stores = stores_df.iloc[:, 0].astype(str).tolist()
     else:
         stores_text = st.text_area("Stores (one per line)")
         stores = [s.strip() for s in stores_text.split("\n") if s.strip()]
@@ -48,8 +81,18 @@ with st.sidebar:
     trailer_capacity = st.number_input("Trailer Capacity", value=1600)
     pallet_cube = st.number_input("Cube per Pallet", value=50)
 
-# Main Tabs
-tab1, tab2, tab3, tab4 = st.tabs(["Data Entry", "Summary & Planning", "Outputs", "History"])
+# Main Tabs (Conditional on Role)
+tabs = ["Data Entry", "Summary & Planning", "Outputs"]
+if user_role == "admin":
+    tabs.append("History")  # Only admins see History
+
+selected_tabs = st.tabs(tabs)
+
+data_entry_tab = selected_tabs[0]
+summary_planning_tab = selected_tabs[1]
+outputs_tab = selected_tabs[2]
+history_tab = selected_tabs[3] if user_role == "admin" else None
+
 
 with tab1:
     st.header("Cube Data Entry")
