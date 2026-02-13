@@ -185,7 +185,7 @@ if "store_ready_times" not in st.session_state:
 if "trailer_capacity" not in st.session_state:
     st.session_state["trailer_capacity"] = 1600
 if "fluff" not in st.session_state:
-    st.session_state["fluff"] = 50
+    st.session_state["fluff"] = 200
 if "df" not in st.session_state:
     st.session_state["df"] = pd.DataFrame()
 if "runs_df" not in st.session_state:
@@ -226,8 +226,8 @@ if selected_page == "Settings":
 
     fluff = st.selectbox(
         "Fluff (extra cube buffer)",
-        options=[50, 100, 150, 200, 250],
-        index=[50, 100, 150, 200, 250].index(st.session_state["fluff"]),
+        options=[50, 100, 150, 200, 250, 300],
+        index=[50, 100, 150, 200, 250, 300].index(st.session_state["fluff"]),
     )
     st.session_state["fluff"] = fluff
 
