@@ -54,6 +54,99 @@ def preprocess_image(img):
     except Exception as e:
         raise RuntimeError(f"Error in image preprocessing: {e}")
 
+def normalize_ocr_char(c):
+    """Map common OCR misreads to the intended digit."""
+    _MAP = {'O': '0', 'o': '0', 'l': '1', 'I': '1', 'S': '5',
+            'B': '8', 'Z': '2', 'z': '2', 'g': '9', 'D': '0'}
+    return _MAP.get(c, c)
+
+
+def fuzzy_store_match(text, known_stores):
+    """Try to match OCR text to a known store number."""
+    text = text.strip()
+    if text in known_stores:
+        return text
+    normalized = ''.join(normalize_ocr_char(c) for c in text)
+    if normalized in known_stores:
+        return normalized
+    return None
+
+
+def parse_ocr_number(text):
+    """Parse a number from OCR text, handling common misreads."""
+    text = text.strip().replace(',', '').replace(' ', '')
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    normalized = ''.join(normalize_ocr_char(c) for c in text)
+    normalized = normalized.replace(',', '').replace(' ', '')
+    try:
+        return float(normalized)
+    except ValueError:
+        return None
+
+
+def _group_into_rows(results, y_threshold=30):
+    """Group OCR results into rows by Y position."""
+    sorted_results = sorted(results, key=lambda r: (r[0][0][1], r[0][0][0]))
+    rows = []
+    current_row = []
+    prev_y = None
+    for bbox, text, conf in sorted_results:
+        y = bbox[0][1]
+        if prev_y is None or abs(y - prev_y) < y_threshold:
+            current_row.append((bbox, text.strip(), conf))
+        else:
+            if current_row:
+                rows.append(sorted(current_row, key=lambda item: item[0][0][0]))
+            current_row = [(bbox, text.strip(), conf)]
+        prev_y = y
+    if current_row:
+        rows.append(sorted(current_row, key=lambda item: item[0][0][0]))
+    return rows
+
+
+def parse_single_dept_ocr(results, stores, min_conf=0.5, y_threshold=30):
+    """Parse OCR results from a single-department image.
+
+    Each row is expected to contain a store number and a cube value.
+    Returns (store_cubes, skipped_rows) where store_cubes is a dict
+    {store: cube_value} and skipped_rows is a list of unrecognized row texts.
+    """
+    results = [r for r in results if r[2] >= min_conf]
+    rows = _group_into_rows(results, y_threshold)
+
+    known_stores = set(stores)
+    store_cubes = {}
+    skipped_rows = []
+
+    for row in rows:
+        texts = [item[1] for item in row if item[1]]
+        if not texts:
+            continue
+
+        store = None
+        value = None
+        for t in texts:
+            if store is None:
+                matched = fuzzy_store_match(t, known_stores)
+                if matched is not None:
+                    store = matched
+                    continue
+            if value is None:
+                parsed = parse_ocr_number(t)
+                if parsed is not None:
+                    value = parsed
+
+        if store is not None and value is not None:
+            store_cubes[store] = store_cubes.get(store, 0) + value
+        elif texts:
+            skipped_rows.append(texts)
+
+    return store_cubes, skipped_rows
+
+
 def parse_ocr_results(results, departments, stores, min_conf=0.5, y_threshold=30):
     try:
         # Filter low-confidence results
