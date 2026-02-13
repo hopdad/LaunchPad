@@ -4,6 +4,7 @@ from PIL import Image
 import pdf2image  # Unused here, but kept if needed
 import numpy as np
 import cv2
+import pandas as pd
 
 def preprocess_image(img):
     try:
@@ -79,16 +80,14 @@ def parse_ocr_results(results, departments, stores, min_conf=0.5, y_threshold=30
         data = []
         known_stores = set(stores)
         dept_map = {dept.lower(): dept for dept in departments}
-        is_header = True  # Assume first row might be header
-        
+
         for row in rows:
             texts = [item[1] for item in row if item[1]]  # Skip empty
             if not texts:
                 continue
-            
-            # Skip if looks like header (contains dept names or "STORE")
-            if is_header and any(t.lower() in dept_map or t.lower() == "store" for t in texts):
-                is_header = False
+
+            # Skip any row that looks like a header (contains dept names or "STORE")
+            if any(t.lower() in dept_map or t.lower() == "store" for t in texts):
                 continue
             
             potential_store = texts[0]
