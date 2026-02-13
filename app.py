@@ -91,7 +91,7 @@ if "runs_df" not in st.session_state:
     st.session_state["runs_df"] = pd.DataFrame()
 
 # Sidebar navigation
-pages = ["Settings", "Data Entry", "Summary & Planning", "Actuals", "Outputs"]
+pages = ["Settings", "Configure", "Data Entry", "Summary & Planning", "Actuals", "Outputs"]
 if user_role == "admin":
     pages.append("History")
 
@@ -116,7 +116,25 @@ if selected_page == "Settings":
         st.stop()
     st.session_state["departments"] = departments
 
-    st.subheader("Stores")
+    trailer_capacity = st.number_input(
+        "Trailer Capacity",
+        value=st.session_state["trailer_capacity"],
+        min_value=1,
+    )
+    st.session_state["trailer_capacity"] = trailer_capacity
+
+    fluff = st.selectbox(
+        "Fluff (extra cube buffer)",
+        options=[50, 100, 150, 200, 250],
+        index=[50, 100, 150, 200, 250].index(st.session_state["fluff"]),
+    )
+    st.session_state["fluff"] = fluff
+
+# --- Configure Page ---
+if selected_page == "Configure":
+    st.header("Configure Stores")
+    st.caption("Add, remove, or reorder stores. Changes are saved automatically.")
+
     stores_edit_df = pd.DataFrame(
         {"Store": st.session_state["stores"]} if st.session_state["stores"] else {"Store": []},
     )
@@ -140,20 +158,6 @@ if selected_page == "Settings":
     if not stores:
         st.warning("Add at least one store to get started.")
     st.session_state["stores"] = stores
-
-    trailer_capacity = st.number_input(
-        "Trailer Capacity",
-        value=st.session_state["trailer_capacity"],
-        min_value=1,
-    )
-    st.session_state["trailer_capacity"] = trailer_capacity
-
-    fluff = st.selectbox(
-        "Fluff (extra cube buffer)",
-        options=[50, 100, 150, 200, 250],
-        index=[50, 100, 150, 200, 250].index(st.session_state["fluff"]),
-    )
-    st.session_state["fluff"] = fluff
 
 # Read settings from session state for all other pages
 departments = st.session_state["departments"]
