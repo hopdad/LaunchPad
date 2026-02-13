@@ -360,7 +360,7 @@ if selected_page == "Data Entry":
             with st.expander(f"Store {store}"):
                 row = {"STORE": store}
                 for dept in departments:
-                    row[dept] = st.number_input(f"{dept} Cube for {store}", min_value=0.0, value=0.0)
+                    row[dept] = st.number_input(f"{dept} Cube for {store}", min_value=0.0, value=0.0, key=f"manual_{store}_{dept}")
                 data.append(row)
 
     if data:
