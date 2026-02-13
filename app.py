@@ -1,4 +1,7 @@
 import streamlit as st
+
+st.set_page_config(page_title="Peddle Sheet Generator", layout="wide")
+
 import pandas as pd
 from math import ceil
 import io
