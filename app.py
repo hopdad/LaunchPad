@@ -1,12 +1,12 @@
-import streamlit as st
+mport streamlit as st
 import pandas as pd
 from math import ceil
 import io
 from fpdf import FPDF
-from datetime import datetime
+from datetime import datetime, timedelta  # For prior day
 from utils import preprocess_image, parse_ocr_results
-from db_utils import get_db_connection, save_data_to_db, fetch_historical_data
-import streamlit_authenticator as stauth  # New import
+from db_utils import get_db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles
+import streamlit_authenticator as stauth
 
 # Auth Setup (hardcoded for now; use secrets.toml in prod)
 credentials = {
@@ -82,17 +82,17 @@ with st.sidebar:
     pallet_cube = st.number_input("Cube per Pallet", value=50)
 
 # Main Tabs (Conditional on Role)
-tabs = ["Data Entry", "Summary & Planning", "Outputs"]
+tabs = ["Data Entry", "Summary & Planning", "Actuals", "Outputs"]
 if user_role == "admin":
-    tabs.append("History")  # Only admins see History
+    tabs.append("History")
 
 selected_tabs = st.tabs(tabs)
 
 data_entry_tab = selected_tabs[0]
 summary_planning_tab = selected_tabs[1]
-outputs_tab = selected_tabs[2]
-history_tab = selected_tabs[3] if user_role == "admin" else None
-
+actuals_tab = selected_tabs[2]
+outputs_tab = selected_tabs[3]
+history_tab = selected_tabs[4] if user_role == "admin" else None
 
 with tab1:
     st.header("Cube Data Entry")
@@ -307,6 +307,40 @@ with tab2:
         except Exception as e:
             st.error(f"Error in summary or planning: {e}")
 
+with actuals_tab:
+    st.header("Enter Actual Peddles (From Prior Day)")
+    prior_date = datetime.today() - timedelta(days=1)
+    st.write(f"Showing projections from {prior_date.strftime('%Y-%m-%d')}. Enter what actually happened.")
+    
+    try:
+        conn, c = get_db_connection()
+        prior_peddles_df = fetch_prior_peddles(prior_date, c)
+        
+        if not prior_peddles_df.empty:
+            st.dataframe(prior_peddles_df)
+            
+            # Form to input actuals
+            actuals = []
+            for _, row in prior_peddles_df.iterrows():
+                with st.expander(f"Run {row['Run']} ({row['Stores']}) - Projected: {row['Total Cube']} cube, Second Trailer: {row['Second Trailer']}"):
+                    actual_trailers = st.number_input(f"Actual Trailers Used", min_value=1, value=1, key=f"actual_trailers_{row['Run']}")
+                    actual_notes = st.text_input(f"Notes/Variances", key=f"actual_notes_{row['Run']}")
+                    actuals.append({
+                        "Run": row['Run'],
+                        "Actual Trailers": actual_trailers,
+                        "Actual Notes": actual_notes
+                    })
+            
+            if st.button("Save Actuals"):
+                save_actual_peddles(pd.DataFrame(actuals), prior_date, conn, c)
+                st.success("Actuals saved! This data will help refine future estimates.")
+        else:
+            st.info("No prior day data found. Process today's sheet first.")
+    except Exception as e:
+        st.error(f"Error loading prior data: {e}")
+finally:
+        conn.close()
+
 with tab3:
     if not df.empty:
         date = st.date_input("Sheet Date", datetime.today())
@@ -354,7 +388,8 @@ with tab3:
             finally:
                 conn.close()
 
-with tab4:
+if user_role == "admin":
+    with history_tab:
     st.header("Historical Data")
     query_date = st.date_input("View Data For", datetime.today())
     try:
