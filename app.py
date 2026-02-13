@@ -7,7 +7,7 @@ from math import ceil
 import io
 from datetime import datetime, timedelta
 from utils import preprocess_image, parse_ocr_results, parse_single_dept_ocr
-from db_utils import db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles
+from db_utils import db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles, save_settings, load_settings
 from planning import auto_suggest_runs
 from exports import generate_pdf, generate_excel
 import streamlit_authenticator as stauth
@@ -175,17 +175,15 @@ st.write("Streamlit-powered web app for daily peddle planning. Access via browse
 # Hardcoded cube per pallet
 pallet_cube = 50
 
-# Initialize session state defaults
+# Initialize session state defaults (load persisted settings from DB)
 if "departments" not in st.session_state:
-    st.session_state["departments"] = ["882", "883", "MB"]
-if "stores" not in st.session_state:
-    st.session_state["stores"] = []
-if "store_ready_times" not in st.session_state:
-    st.session_state["store_ready_times"] = {}
-if "trailer_capacity" not in st.session_state:
-    st.session_state["trailer_capacity"] = 1600
-if "fluff" not in st.session_state:
-    st.session_state["fluff"] = 200
+    with db_connection() as (conn, c):
+        _saved = load_settings(c)
+    st.session_state["departments"] = _saved.get("departments", ["882", "883", "MB"])
+    st.session_state["stores"] = _saved.get("stores", [])
+    st.session_state["store_ready_times"] = _saved.get("store_ready_times", {})
+    st.session_state["trailer_capacity"] = _saved.get("trailer_capacity", 1600)
+    st.session_state["fluff"] = _saved.get("fluff", 200)
 if "df" not in st.session_state:
     st.session_state["df"] = pd.DataFrame()
 if "runs_df" not in st.session_state:
@@ -230,6 +228,16 @@ if selected_page == "Settings":
         index=[50, 100, 150, 200, 250, 300].index(st.session_state["fluff"]),
     )
     st.session_state["fluff"] = fluff
+
+    # Persist settings to DB
+    with db_connection() as (conn, c):
+        save_settings({
+            "departments": st.session_state["departments"],
+            "trailer_capacity": st.session_state["trailer_capacity"],
+            "fluff": st.session_state["fluff"],
+            "stores": st.session_state["stores"],
+            "store_ready_times": st.session_state["store_ready_times"],
+        }, conn, c)
 
 # --- Configure Page ---
 if selected_page == "Configure":
@@ -280,6 +288,11 @@ if selected_page == "Configure":
             if s.strip() and s.strip() != "nan"
         }
         st.session_state["stores"] = edited_stores
+        with db_connection() as (conn, c):
+            save_settings({
+                "stores": st.session_state["stores"],
+                "store_ready_times": st.session_state["store_ready_times"],
+            }, conn, c)
 
     # --- Import from file (with diff review) ---
     with st.expander("Import stores from file"):
@@ -354,6 +367,11 @@ if selected_page == "Configure":
                         added = sum(1 for v in st.session_state.get("_pending_adds", {}).values() if v)
                         removed = sum(1 for v in st.session_state.get("_pending_removes", {}).values() if v)
                         st.session_state["stores"] = new_stores
+                        with db_connection() as (conn, c):
+                            save_settings({
+                                "stores": st.session_state["stores"],
+                                "store_ready_times": st.session_state["store_ready_times"],
+                            }, conn, c)
                         # Clean up temp state
                         for k in ("_import_file_id", "_pending_adds", "_pending_removes", "_imported_ready_times"):
                             st.session_state.pop(k, None)

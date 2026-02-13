@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import sqlite3
 from contextlib import contextmanager
@@ -19,6 +20,8 @@ _SCHEMA = [
     '''CREATE TABLE IF NOT EXISTS actual_peddles
        (date TEXT, run INTEGER, actual_trailers INTEGER, actual_notes TEXT,
         PRIMARY KEY (date, run))''',
+    '''CREATE TABLE IF NOT EXISTS app_settings
+       (key TEXT PRIMARY KEY, value TEXT)''',
 ]
 
 
@@ -108,3 +111,20 @@ def save_actual_peddles(actuals_df, date, conn, c):
     except Exception as e:
         conn.rollback()
         raise RuntimeError(f"Error saving actual peddles: {e}")
+
+
+def save_settings(settings_dict, conn, c):
+    """Persist a dict of app settings to the database.
+
+    Each value is JSON-encoded so lists/dicts round-trip cleanly.
+    """
+    for key, value in settings_dict.items():
+        c.execute("INSERT OR REPLACE INTO app_settings VALUES (?, ?)",
+                  (key, json.dumps(value)))
+    conn.commit()
+
+
+def load_settings(c):
+    """Return all saved settings as a plain dict (values JSON-decoded)."""
+    c.execute("SELECT key, value FROM app_settings")
+    return {row[0]: json.loads(row[1]) for row in c.fetchall()}
