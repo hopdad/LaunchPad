@@ -1,8 +1,10 @@
 import json
+import logging
 import pandas as pd
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = 'peddle_data.db'
 
@@ -31,15 +33,12 @@ def get_db_connection():
     Kept for backward compatibility with existing callers.
     Prefer the ``db_connection`` context manager for new code.
     """
-    try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        c = conn.cursor()
-        for ddl in _SCHEMA:
-            c.execute(ddl)
-        conn.commit()
-        return conn, c
-    except Exception as e:
-        raise RuntimeError(f"Error connecting to DB: {e}")
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c = conn.cursor()
+    for ddl in _SCHEMA:
+        c.execute(ddl)
+    conn.commit()
+    return conn, c
 
 
 @contextmanager
@@ -53,64 +52,66 @@ def db_connection():
 
 
 def save_data_to_db(df, departments, runs_df, date, conn, c):
-    try:
-        date_str = date.strftime('%Y-%m-%d')
+    date_str = date.strftime('%Y-%m-%d')
 
-        for _, row in df.iterrows():
-            c.execute("INSERT OR REPLACE INTO store_summaries VALUES (?, ?, ?, ?)",
-                      (date_str, row['STORE'], row['TOTAL'], row['DIFF']))
-            for dept in departments:
-                if dept in row:
-                    c.execute("INSERT OR REPLACE INTO dept_cubes VALUES (?, ?, ?, ?)",
-                              (date_str, row['STORE'], dept, row[dept]))
+    for _, row in df.iterrows():
+        c.execute("INSERT OR REPLACE INTO store_summaries VALUES (?, ?, ?, ?)",
+                  (date_str, row['STORE'], row['TOTAL'], row['DIFF']))
+        for dept in departments:
+            if dept in row:
+                c.execute("INSERT OR REPLACE INTO dept_cubes VALUES (?, ?, ?, ?)",
+                          (date_str, row['STORE'], dept, row[dept]))
 
-        for _, run in runs_df.iterrows():
-            c.execute("INSERT OR REPLACE INTO peddle_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                      (date_str, run['Run'], run.get('Time', ''), run['Stores'], run['Carrier'], run['Total Cube'], run['Second Trailer'], run.get('Fit Note', '')))
+    for _, run in runs_df.iterrows():
+        c.execute("INSERT OR REPLACE INTO peddle_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  (date_str, run['Run'], run.get('Time', ''), run['Stores'], run['Carrier'], run['Total Cube'], run['Second Trailer'], run.get('Fit Note', '')))
 
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise RuntimeError(f"Error saving to DB: {e}")
+    conn.commit()
 
 
 def fetch_historical_data(query_date, c):
-    try:
-        date_str = query_date.strftime('%Y-%m-%d')
+    date_str = query_date.strftime('%Y-%m-%d')
 
-        c.execute("SELECT * FROM store_summaries WHERE date = ?", (date_str,))
-        summaries = pd.DataFrame(c.fetchall(), columns=['Date', 'Store', 'Total', 'Diff'])
+    c.execute("SELECT * FROM store_summaries WHERE date = ?", (date_str,))
+    summaries = pd.DataFrame(c.fetchall(), columns=['Date', 'Store', 'Total', 'Diff'])
 
-        c.execute("SELECT * FROM peddle_runs WHERE date = ?", (date_str,))
-        runs = pd.DataFrame(c.fetchall(), columns=['Date', 'Run', 'Time', 'Stores', 'Carrier', 'Total Cube', 'Second Trailer', 'Fit Note'])
+    c.execute("SELECT * FROM peddle_runs WHERE date = ?", (date_str,))
+    runs = pd.DataFrame(c.fetchall(), columns=['Date', 'Run', 'Time', 'Stores', 'Carrier', 'Total Cube', 'Second Trailer', 'Fit Note'])
 
-        c.execute("SELECT date, SUM(total) FROM store_summaries GROUP BY date")
-        totals = pd.DataFrame(c.fetchall(), columns=['Date', 'Total Cube'])
+    c.execute("SELECT date, SUM(total) FROM store_summaries GROUP BY date")
+    totals = pd.DataFrame(c.fetchall(), columns=['Date', 'Total Cube'])
 
-        return summaries, runs, totals
-    except Exception as e:
-        raise RuntimeError(f"Error fetching historical data: {e}")
+    return summaries, runs, totals
 
 
 def fetch_prior_peddles(prior_date, c):
-    try:
-        date_str = prior_date.strftime('%Y-%m-%d')
-        c.execute("SELECT * FROM peddle_runs WHERE date = ?", (date_str,))
-        return pd.DataFrame(c.fetchall(), columns=['Date', 'Run', 'Time', 'Stores', 'Carrier', 'Total Cube', 'Second Trailer', 'Fit Note'])
-    except Exception as e:
-        raise RuntimeError(f"Error fetching prior peddles: {e}")
+    date_str = prior_date.strftime('%Y-%m-%d')
+    c.execute("SELECT * FROM peddle_runs WHERE date = ?", (date_str,))
+    return pd.DataFrame(c.fetchall(), columns=['Date', 'Run', 'Time', 'Stores', 'Carrier', 'Total Cube', 'Second Trailer', 'Fit Note'])
+
+
+def fetch_actuals_for_date(date, c):
+    """Return actual peddle data for the given date as a DataFrame."""
+    date_str = date.strftime('%Y-%m-%d')
+    c.execute("SELECT * FROM actual_peddles WHERE date = ?", (date_str,))
+    rows = c.fetchall()
+    if not rows:
+        return pd.DataFrame(columns=['Date', 'Run', 'Actual Trailers', 'Actual Notes'])
+    return pd.DataFrame(rows, columns=['Date', 'Run', 'Actual Trailers', 'Actual Notes'])
+
+
+def fetch_per_store_history(c):
+    """Return per-store totals across all dates for trend analysis."""
+    c.execute("SELECT date, store, total FROM store_summaries ORDER BY date, store")
+    return pd.DataFrame(c.fetchall(), columns=['Date', 'Store', 'Total'])
 
 
 def save_actual_peddles(actuals_df, date, conn, c):
-    try:
-        date_str = date.strftime('%Y-%m-%d')
-        for _, row in actuals_df.iterrows():
-            c.execute("INSERT OR REPLACE INTO actual_peddles VALUES (?, ?, ?, ?)",
-                      (date_str, row['Run'], row['Actual Trailers'], row['Actual Notes']))
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise RuntimeError(f"Error saving actual peddles: {e}")
+    date_str = date.strftime('%Y-%m-%d')
+    for _, row in actuals_df.iterrows():
+        c.execute("INSERT OR REPLACE INTO actual_peddles VALUES (?, ?, ?, ?)",
+                  (date_str, row['Run'], row['Actual Trailers'], row['Actual Notes']))
+    conn.commit()
 
 
 def save_settings(settings_dict, conn, c):
