@@ -6,7 +6,7 @@ import pandas as pd
 from math import ceil
 import io
 from datetime import datetime, timedelta
-from utils import preprocess_image, parse_ocr_results
+from utils import preprocess_image, parse_ocr_results, parse_single_dept_ocr
 from db_utils import db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles
 from planning import auto_suggest_runs
 from exports import generate_pdf, generate_excel
@@ -415,18 +415,25 @@ if selected_page == "Data Entry":
                     st.error(f"Error combining CSVs: {e}")
 
     elif entry_method == "Upload Image/Screenshot/PDF (OCR)":
-        upload_files = st.file_uploader("Upload one or more images/screenshots or PDFs", type=["jpg", "png", "jpeg", "pdf"], accept_multiple_files=True)
+        st.info("Upload one image/screenshot/PDF per department. Each file should contain store numbers and cube values.")
         ocr_engine = st.selectbox("OCR Engine", ("EasyOCR", "Tesseract"))
-        if upload_files:
-            combined_data = []
-            with st.spinner("Processing uploads with OCR..."):
-                for upload_file in upload_files:
+
+        dept_data = {}  # {dept: {store: cube_value}}
+        for dept in departments:
+            st.subheader(f"Department: {dept}")
+            upload_file = st.file_uploader(
+                f"Upload image/screenshot/PDF for {dept}",
+                type=["jpg", "png", "jpeg", "pdf"],
+                key=f"ocr_upload_{dept}",
+            )
+            if upload_file:
+                with st.spinner(f"Processing {dept} upload with {ocr_engine}..."):
                     try:
+                        all_results = []
                         image_bytes = upload_file.read()
                         if upload_file.type == "application/pdf":
                             pdf_pages = convert_from_bytes(image_bytes)
                             for i, page in enumerate(pdf_pages):
-                                st.info(f"Processing page {i+1} of {upload_file.name}")
                                 preprocessed_img = preprocess_image(page)
                                 if ocr_engine == "EasyOCR":
                                     reader = easyocr.Reader(['en'])
@@ -441,60 +448,47 @@ if selected_page == "Data Entry":
                                             text = tess_data['text'][j]
                                             conf = float(tess_data['conf'][j]) / 100.0
                                             results.append((bbox, text, conf))
-
-                                extracted_texts = [text for _, text, _ in results]
-                                st.write(f"Extracted Texts Preview for {upload_file.name} page {i+1}:")
-                                st.text(", ".join(extracted_texts[:100]))
-
-                                page_data = parse_ocr_results(results, departments, stores)
-                                combined_data.extend(page_data)
+                                all_results.extend(results)
                         else:
                             page_img = Image.open(io.BytesIO(image_bytes))
                             preprocessed_img = preprocess_image(page_img)
                             if ocr_engine == "EasyOCR":
                                 reader = easyocr.Reader(['en'])
-                                results = reader.readtext(preprocessed_img)
+                                all_results = reader.readtext(preprocessed_img)
                             else:
                                 tess_data = pytesseract.image_to_data(preprocessed_img, output_type=pytesseract.Output.DICT)
-                                results = []
                                 for j in range(len(tess_data['text'])):
                                     if float(tess_data['conf'][j]) > 0:
                                         x, y, w, h = tess_data['left'][j], tess_data['top'][j], tess_data['width'][j], tess_data['height'][j]
                                         bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
                                         text = tess_data['text'][j]
                                         conf = float(tess_data['conf'][j]) / 100.0
-                                        results.append((bbox, text, conf))
+                                        all_results.append((bbox, text, conf))
 
-                            extracted_texts = [text for _, text, _ in results]
-                            st.write(f"Extracted Texts Preview for {upload_file.name}:")
-                            st.text(", ".join(extracted_texts[:100]))
+                        store_cubes, skipped = parse_single_dept_ocr(all_results, stores)
+                        dept_data[dept] = store_cubes
 
-                            file_data = parse_ocr_results(results, departments, stores)
-                            combined_data.extend(file_data)
+                        matched = len(store_cubes)
+                        total = len(stores)
+                        if matched:
+                            st.success(f"Matched {matched}/{total} store(s) for {dept}.")
+                        else:
+                            st.warning(f"No stores matched for {dept}. Check the image quality.")
+                        if skipped:
+                            with st.expander(f"Unrecognized rows for {dept} ({len(skipped)})"):
+                                for row_texts in skipped:
+                                    st.text(", ".join(row_texts))
                     except Exception as e:
-                        st.error(f"Error processing {upload_file.name}: {e}")
-                        continue
+                        st.error(f"Error processing {dept} upload: {e}")
 
-                if combined_data:
-                    try:
-                        combined_df = pd.DataFrame(combined_data)
-                        if not combined_df.empty:
-                            combined_df = combined_df.groupby("STORE")[departments].sum().reset_index()
-                            combined_df["STORE"] = combined_df["STORE"].astype(str)
-                            extracted = {row["STORE"]: row for _, row in combined_df.iterrows()}
-                            data = []
-                            for store in stores:
-                                if store in extracted:
-                                    row = extracted[store]
-                                else:
-                                    row = {"STORE": store}
-                                    for dept in departments:
-                                        row[dept] = 0.0
-                                    st.warning(f"Store {store} not in uploads; defaulting to 0 cubes.")
-                                data.append(row)
-                        st.success(f"Auto-filled from {len(upload_files)} files using {ocr_engine}! Edit below if needed.")
-                    except Exception as e:
-                        st.error(f"Error combining OCR data: {e}")
+        if dept_data:
+            for store in stores:
+                row = {"STORE": store}
+                for dept in departments:
+                    row[dept] = dept_data.get(dept, {}).get(store, 0.0)
+                data.append(row)
+            uploaded_depts = [d for d in departments if d in dept_data]
+            st.success(f"Combined data from {len(uploaded_depts)} department upload(s). Review below.")
 
     else:
         for store in stores:
