@@ -75,7 +75,7 @@ st.write("Streamlit-powered web app for daily peddle planning. Access via browse
 
 # Sidebar Config
 with st.sidebar:
-    st.image("Logo.png", use_container_width=True)
+    st.image("logo.jpg", use_container_width=True)
     st.divider()
 
     st.header("Configuration")
