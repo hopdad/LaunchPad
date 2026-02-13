@@ -1,4 +1,4 @@
-mport streamlit as st
+import streamlit as st
 import pandas as pd
 from math import ceil
 import io
@@ -7,6 +7,10 @@ from datetime import datetime, timedelta  # For prior day
 from utils import preprocess_image, parse_ocr_results
 from db_utils import get_db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles
 import streamlit_authenticator as stauth
+from pdf2image import convert_from_bytes
+from PIL import Image
+import easyocr
+import pytesseract
 
 # Auth Setup (hardcoded for now; use secrets.toml in prod)
 credentials = {
@@ -94,7 +98,7 @@ actuals_tab = selected_tabs[2]
 outputs_tab = selected_tabs[3]
 history_tab = selected_tabs[4] if user_role == "admin" else None
 
-with tab1:
+with data_entry_tab:
     st.header("Cube Data Entry")
     entry_method = st.selectbox("Entry Method", ("Manual Entry", "Upload Image/Screenshot/PDF (OCR)", "Upload CSV"))
     
@@ -118,7 +122,7 @@ with tab1:
             
             if not combined_csv_df.empty:
                 try:
-                    combined_csv_df = combined_csv_df.groupby("STORE", as_index=False).sum(numeric_only=True)
+                    combined_csv_df = combined_csv_df.groupby("STORE")[departments].sum().reset_index()
                     combined_csv_df["STORE"] = combined_csv_df["STORE"].astype(str)
                     
                     extracted = {row["STORE"]: row for _, row in combined_csv_df.iterrows()}
@@ -145,7 +149,7 @@ with tab1:
                     try:
                         image_bytes = upload_file.read()
                         if upload_file.type == "application/pdf":
-                            pages = pdf2image.convert_from_bytes(image_bytes)
+                            pages = convert_from_bytes(image_bytes)
                             for i, page in enumerate(pages):
                                 st.info(f"Processing page {i+1} of {upload_file.name}")
                                 preprocessed_img = preprocess_image(page)
@@ -156,7 +160,7 @@ with tab1:
                                     tess_data = pytesseract.image_to_data(preprocessed_img, output_type=pytesseract.Output.DICT)
                                     results = []
                                     for j in range(len(tess_data['text'])):
-                                        if int(tess_data['conf'][j]) > 0:
+                                        if float(tess_data['conf'][j]) > 0:
                                             x, y, w, h = tess_data['left'][j], tess_data['top'][j], tess_data['width'][j], tess_data['height'][j]
                                             bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
                                             text = tess_data['text'][j]
@@ -179,7 +183,7 @@ with tab1:
                                 tess_data = pytesseract.image_to_data(preprocessed_img, output_type=pytesseract.Output.DICT)
                                 results = []
                                 for j in range(len(tess_data['text'])):
-                                    if int(tess_data['conf'][j]) > 0:
+                                    if float(tess_data['conf'][j]) > 0:
                                         x, y, w, h = tess_data['left'][j], tess_data['top'][j], tess_data['width'][j], tess_data['height'][j]
                                         bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
                                         text = tess_data['text'][j]
@@ -200,7 +204,7 @@ with tab1:
                     try:
                         combined_df = pd.DataFrame(combined_data)
                         if not combined_df.empty:
-                            combined_df = combined_df.groupby("STORE", as_index=False).sum(numeric_only=True)
+                            combined_df = combined_df.groupby("STORE")[departments].sum().reset_index()
                             combined_df["STORE"] = combined_df["STORE"].astype(str)
                             extracted = {row["STORE"]: row for _, row in combined_df.iterrows()}
                             data = []
@@ -236,7 +240,7 @@ with tab1:
         except Exception as e:
             st.error(f"Error processing data: {e}")
 
-with tab2:
+with summary_planning_tab:
     if not df.empty:
         try:
             total_cube = df["TOTAL"].sum()
@@ -309,9 +313,10 @@ with tab2:
 
 with actuals_tab:
     st.header("Enter Actual Peddles (From Prior Day)")
-    prior_date = datetime.today() - timedelta(days=1)
+    prior_date = (datetime.today() - timedelta(days=1)).date()
     st.write(f"Showing projections from {prior_date.strftime('%Y-%m-%d')}. Enter what actually happened.")
     
+    conn = None
     try:
         conn, c = get_db_connection()
         prior_peddles_df = fetch_prior_peddles(prior_date, c)
@@ -338,12 +343,17 @@ with actuals_tab:
             st.info("No prior day data found. Process today's sheet first.")
     except Exception as e:
         st.error(f"Error loading prior data: {e}")
-finally:
-        conn.close()
+    finally:
+        if conn:
+            conn.close()
 
-with tab3:
+with outputs_tab:
     if not df.empty:
         date = st.date_input("Sheet Date", datetime.today())
+        total_cube = df["TOTAL"].sum()
+        pallet_count = ceil(total_cube / pallet_cube)
+        trailer_goal = total_cube / trailer_capacity
+        probable_trailers = ceil(trailer_goal * 1.1)
         if st.button("Generate PDF Sheet"):
             try:
                 pdf = FPDF()
@@ -379,6 +389,7 @@ with tab3:
             st.error(f"Error generating Excel: {e}")
         
         if st.button("Save to DB"):
+            conn = None
             try:
                 conn, c = get_db_connection()
                 save_data_to_db(df, departments, runs_df, date, conn, c)
@@ -386,28 +397,31 @@ with tab3:
             except Exception as e:
                 st.error(f"Error saving to DB: {e}")
             finally:
-                conn.close()
+                if conn:
+                    conn.close()
 
 if user_role == "admin":
     with history_tab:
-    st.header("Historical Data")
-    query_date = st.date_input("View Data For", datetime.today())
-    try:
-        conn, c = get_db_connection()
-        summaries, runs, totals = fetch_historical_data(query_date, c)
-        
-        if not summaries.empty:
-            st.subheader("Store Summaries")
-            st.dataframe(summaries)
-        
-        if not runs.empty:
-            st.subheader("Peddle Runs")
-            st.dataframe(runs)
-        
-        if not totals.empty:
-            st.subheader("Cube Trends")
-            st.line_chart(totals.set_index('Date'))
-    except Exception as e:
-        st.error(f"Error fetching historical data: {e}")
-    finally:
-        conn.close()
+        st.header("Historical Data")
+        query_date = st.date_input("View Data For", datetime.today())
+        conn = None
+        try:
+            conn, c = get_db_connection()
+            summaries, runs, totals = fetch_historical_data(query_date, c)
+            
+            if not summaries.empty:
+                st.subheader("Store Summaries")
+                st.dataframe(summaries)
+            
+            if not runs.empty:
+                st.subheader("Peddle Runs")
+                st.dataframe(runs)
+            
+            if not totals.empty:
+                st.subheader("Cube Trends")
+                st.line_chart(totals.set_index('Date'))
+        except Exception as e:
+            st.error(f"Error fetching historical data: {e}")
+        finally:
+            if conn:
+                conn.close()
