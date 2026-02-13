@@ -4,14 +4,14 @@ import sqlite3
 from datetime import datetime
 
 def get_db_connection():
-    try:
-        conn = sqlite3.connect('peddle_data.db', check_same_thread=False)
-        c = conn.cursor()
+    conn = sqlite3.connect('peddle_data.db', check_same_thread=False)
+    c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS store_summaries (date TEXT, store TEXT, total REAL, diff REAL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS dept_cubes (date TEXT, store TEXT, dept TEXT, cube REAL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS peddle_runs (date TEXT, run INTEGER, time TEXT, stores TEXT, carrier TEXT, total_cube REAL, second_trailer TEXT, fit_note TEXT)''')
-        conn.commit()
-        return conn, c
+  c.execute('''CREATE TABLE IF NOT EXISTS actual_peddles (date TEXT, run INTEGER, actual_trailers INTEGER, actual_notes TEXT)''')
+    conn.commit()
+    return conn, c
     except Exception as e:
         raise RuntimeError(f"Error connecting to DB: {e}")
 
@@ -51,3 +51,15 @@ def fetch_historical_data(query_date, c):
         return summaries, runs, totals
     except Exception as e:
         raise RuntimeError(f"Error fetching historical data: {e}")
+
+def fetch_prior_peddles(prior_date, c):
+    date_str = prior_date.strftime('%Y-%m-%d')
+    c.execute("SELECT * FROM peddle_runs WHERE date = ?", (date_str,))
+    return pd.DataFrame(c.fetchall(), columns=['Date', 'Run', 'Time', 'Stores', 'Carrier', 'Total Cube', 'Second Trailer', 'Fit Note'])
+
+def save_actual_peddles(actuals_df, date, conn, c):
+    date_str = date.strftime('%Y-%m-%d')
+    for _, row in actuals_df.iterrows():
+        c.execute("INSERT INTO actual_peddles VALUES (?, ?, ?, ?)",
+                  (date_str, row['Run'], row['Actual Trailers'], row['Actual Notes']))
+    conn.commit()
