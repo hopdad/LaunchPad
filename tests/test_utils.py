@@ -258,3 +258,47 @@ class TestParseOcrResults:
         assert row["882"] == 500.0
         assert row["883"] == 0.0
         assert row["MB"] == 0.0
+
+    def test_header_in_middle_skipped(self):
+        """A header-like row appearing after data rows should also be skipped."""
+        results = [
+            # Data row first (no header before it)
+            _make_result(0, 0, "100"),
+            _make_result(100, 0, "500"),
+            _make_result(200, 0, "300"),
+            _make_result(300, 0, "200"),
+            # Spurious header row in the middle
+            _make_result(0, 50, "STORE"),
+            _make_result(100, 50, "882"),
+            _make_result(200, 50, "883"),
+            _make_result(300, 50, "MB"),
+            # Second data row
+            _make_result(0, 100, "200"),
+            _make_result(100, 100, "150"),
+            _make_result(200, 100, "250"),
+            _make_result(300, 100, "350"),
+        ]
+        data = parse_ocr_results(results, self.DEPARTMENTS, self.STORES)
+        row_100 = next(r for r in data if r["STORE"] == "100")
+        row_200 = next(r for r in data if r["STORE"] == "200")
+        assert row_100["882"] == 500.0
+        assert row_200["882"] == 150.0
+        assert row_200["MB"] == 350.0
+
+    def test_multiple_headers_skipped(self):
+        """Multiple header rows should all be skipped."""
+        results = [
+            _make_result(0, 0, "STORE"),
+            _make_result(100, 0, "882"),
+            # Another header-like row
+            _make_result(0, 50, "store"),
+            _make_result(100, 50, "883"),
+            # Actual data
+            _make_result(0, 100, "100"),
+            _make_result(100, 100, "400"),
+            _make_result(200, 100, "250"),
+            _make_result(300, 100, "150"),
+        ]
+        data = parse_ocr_results(results, self.DEPARTMENTS, self.STORES)
+        row = next(r for r in data if r["STORE"] == "100")
+        assert row["882"] == 400.0

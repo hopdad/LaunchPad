@@ -5,6 +5,7 @@ from datetime import datetime
 
 from db_utils import (
     get_db_connection,
+    db_connection,
     save_data_to_db,
     fetch_historical_data,
     fetch_prior_peddles,
@@ -57,6 +58,26 @@ class TestGetDbConnection:
         tables = {row[0] for row in c2.fetchall()}
         assert len(tables) >= 4
         conn2.close()
+
+
+class TestDbConnectionContextManager:
+    def test_closes_connection_on_exit(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "test_ctx.db")
+        monkeypatch.setattr("db_utils.DB_PATH", db_path)
+        with db_connection() as (conn, c):
+            c.execute("SELECT 1")
+        # After exiting the context, attempting a query should fail
+        with pytest.raises(Exception):
+            conn.execute("SELECT 1")
+
+    def test_closes_connection_on_exception(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "test_ctx_err.db")
+        monkeypatch.setattr("db_utils.DB_PATH", db_path)
+        with pytest.raises(ValueError):
+            with db_connection() as (conn, c):
+                raise ValueError("boom")
+        with pytest.raises(Exception):
+            conn.execute("SELECT 1")
 
 
 # --- save_data_to_db tests ---

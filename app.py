@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 from math import ceil
 import io
-from fpdf import FPDF
-from datetime import datetime, timedelta  # For prior day
+from datetime import datetime, timedelta
 from utils import preprocess_image, parse_ocr_results
-from db_utils import get_db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles
+from db_utils import db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles
+from planning import auto_suggest_runs
+from exports import generate_pdf, generate_excel
 import streamlit_authenticator as stauth
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -73,24 +74,31 @@ user_role = credentials["usernames"][username]["role"]
 st.title("Peddle Sheet Generator")
 st.write("Streamlit-powered web app for daily peddle planning. Access via browser—no installs needed.")
 
-# Sidebar Config (unchanged)
+# Sidebar Config
 with st.sidebar:
     st.header("Configuration")
-    departments = st.text_input("Departments (e.g., 882,883,MB)", value="882,883,MB").split(",")
-    departments = [d.strip() for d in departments]
-    
+    departments_raw = st.text_input("Departments (e.g., 882,883,MB)", value="882,883,MB")
+    departments = [d.strip() for d in departments_raw.split(",") if d.strip()]
+    if not departments:
+        st.error("Enter at least one department.")
+        st.stop()
+
     store_input_method = st.radio("Add Stores", ("Manual", "Upload List"))
+    stores = []
     if store_input_method == "Upload List":
         store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"])
         if store_file:
             stores_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
-            stores = stores_df.iloc[:, 0].astype(str).tolist()
+            stores = [s.strip() for s in stores_df.iloc[:, 0].astype(str).tolist() if s.strip()]
     else:
         stores_text = st.text_area("Stores (one per line)")
         stores = [s.strip() for s in stores_text.split("\n") if s.strip()]
-    
-    trailer_capacity = st.number_input("Trailer Capacity", value=1600)
-    pallet_cube = st.number_input("Cube per Pallet", value=50)
+
+    if not stores:
+        st.warning("Add at least one store to get started.")
+
+    trailer_capacity = st.number_input("Trailer Capacity", value=1600, min_value=1)
+    pallet_cube = st.number_input("Cube per Pallet", value=50, min_value=1)
 
 # Main Tabs (Conditional on Role)
 tabs = ["Data Entry", "Summary & Planning", "Actuals", "Outputs"]
@@ -266,22 +274,7 @@ with summary_planning_tab:
             
             runs_df = pd.DataFrame()
             if auto_suggest:
-                sorted_df = df.sort_values("TOTAL", ascending=False).copy()
-                runs = []
-                current_run = []
-                current_cube = 0
-                for _, row in sorted_df.iterrows():
-                    if current_cube + row["TOTAL"] <= trailer_capacity:
-                        current_run.append(row["STORE"])
-                        current_cube += row["TOTAL"]
-                    else:
-                        if current_run:
-                            runs.append({"Stores": "/".join(current_run), "Total Cube": current_cube, "Second Trailer": "No" if current_cube <= trailer_capacity else "Yes"})
-                        current_run = [row["STORE"]]
-                        current_cube = row["TOTAL"]
-                if current_run:
-                    runs.append({"Stores": "/".join(current_run), "Total Cube": current_cube, "Second Trailer": "No" if current_cube <= trailer_capacity else "Yes"})
-                
+                runs = auto_suggest_runs(df, trailer_capacity)
                 runs_df = pd.DataFrame(runs)
                 runs_df["Run"] = runs_df.index + 1
                 runs_df["Time"] = ""
@@ -323,36 +316,32 @@ with actuals_tab:
     prior_date = (datetime.today() - timedelta(days=1)).date()
     st.write(f"Showing projections from {prior_date.strftime('%Y-%m-%d')}. Enter what actually happened.")
     
-    conn = None
     try:
-        conn, c = get_db_connection()
-        prior_peddles_df = fetch_prior_peddles(prior_date, c)
-        
-        if not prior_peddles_df.empty:
-            st.dataframe(prior_peddles_df)
-            
-            # Form to input actuals
-            actuals = []
-            for _, row in prior_peddles_df.iterrows():
-                with st.expander(f"Run {row['Run']} ({row['Stores']}) - Projected: {row['Total Cube']} cube, Second Trailer: {row['Second Trailer']}"):
-                    actual_trailers = st.number_input(f"Actual Trailers Used", min_value=1, value=1, key=f"actual_trailers_{row['Run']}")
-                    actual_notes = st.text_input(f"Notes/Variances", key=f"actual_notes_{row['Run']}")
-                    actuals.append({
-                        "Run": row['Run'],
-                        "Actual Trailers": actual_trailers,
-                        "Actual Notes": actual_notes
-                    })
-            
-            if st.button("Save Actuals"):
-                save_actual_peddles(pd.DataFrame(actuals), prior_date, conn, c)
-                st.success("Actuals saved! This data will help refine future estimates.")
-        else:
-            st.info("No prior day data found. Process today's sheet first.")
+        with db_connection() as (conn, c):
+            prior_peddles_df = fetch_prior_peddles(prior_date, c)
+
+            if not prior_peddles_df.empty:
+                st.dataframe(prior_peddles_df)
+
+                # Form to input actuals
+                actuals = []
+                for _, row in prior_peddles_df.iterrows():
+                    with st.expander(f"Run {row['Run']} ({row['Stores']}) - Projected: {row['Total Cube']} cube, Second Trailer: {row['Second Trailer']}"):
+                        actual_trailers = st.number_input(f"Actual Trailers Used", min_value=1, value=1, key=f"actual_trailers_{row['Run']}")
+                        actual_notes = st.text_input(f"Notes/Variances", key=f"actual_notes_{row['Run']}")
+                        actuals.append({
+                            "Run": row['Run'],
+                            "Actual Trailers": actual_trailers,
+                            "Actual Notes": actual_notes
+                        })
+
+                if st.button("Save Actuals"):
+                    save_actual_peddles(pd.DataFrame(actuals), prior_date, conn, c)
+                    st.success("Actuals saved! This data will help refine future estimates.")
+            else:
+                st.info("No prior day data found. Process today's sheet first.")
     except Exception as e:
         st.error(f"Error loading prior data: {e}")
-    finally:
-        if conn:
-            conn.close()
 
 with outputs_tab:
     if not df.empty:
@@ -363,72 +352,43 @@ with outputs_tab:
         probable_trailers = ceil(trailer_goal * 1.1)
         if st.button("Generate PDF Sheet"):
             try:
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.set_font("Arial", size=10)
-                
-                pdf.cell(200, 10, txt=f"Peddle Sheet - {date.strftime('%m/%d/%Y')}", ln=1, align="C")
-                
-                pdf.cell(200, 10, txt="Store Data:", ln=1)
-                for _, row in df.iterrows():
-                    pdf.cell(200, 10, txt=f"STORE {row['STORE']}: {', '.join([f'{dept}: {row[dept]}' for dept in departments])}, TOTAL: {row['TOTAL']}, DIFF: {row['DIFF']}", ln=1)
-                
-                pdf.cell(200, 10, txt=f"Total Cube: {total_cube:.2f}, Trailer Goal: {trailer_goal:.2f}, Probable: {probable_trailers}", ln=1)
-                
-                pdf.cell(200, 10, txt="Peddle Runs:", ln=1)
-                for _, run in runs_df.iterrows():
-                    pdf.cell(200, 10, txt=f"({run['Time']}) {run['Stores']}, Carrier: {run['Carrier']}, Cube: {run['Total Cube']}, Second: {run['Second Trailer']}, Note: {run['Fit Note']}", ln=1)
-                
-                pdf_output = io.BytesIO()
-                pdf.output(pdf_output)
-                pdf_output.seek(0)
+                pdf_output = generate_pdf(df, departments, runs_df, date, total_cube, trailer_goal, probable_trailers)
                 st.download_button("Download Peddle Sheet PDF", pdf_output, file_name=f"ped_sheet_{date.strftime('%Y%m%d')}.pdf", mime="application/pdf")
             except Exception as e:
                 st.error(f"Error generating PDF: {e}")
-        
+
         try:
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False)
-            output.seek(0)
-            st.download_button("Download Data as Excel", output, file_name="ped_data.xlsx")
+            excel_output = generate_excel(df)
+            st.download_button("Download Data as Excel", excel_output, file_name="ped_data.xlsx")
         except Exception as e:
             st.error(f"Error generating Excel: {e}")
         
         if st.button("Save to DB"):
-            conn = None
             try:
-                conn, c = get_db_connection()
-                save_data_to_db(df, departments, runs_df, date, conn, c)
-                st.success("Data saved to database!")
+                with db_connection() as (conn, c):
+                    save_data_to_db(df, departments, runs_df, date, conn, c)
+                    st.success("Data saved to database!")
             except Exception as e:
                 st.error(f"Error saving to DB: {e}")
-            finally:
-                if conn:
-                    conn.close()
 
 if user_role == "admin":
     with history_tab:
         st.header("Historical Data")
         query_date = st.date_input("View Data For", datetime.today())
-        conn = None
         try:
-            conn, c = get_db_connection()
-            summaries, runs, totals = fetch_historical_data(query_date, c)
-            
-            if not summaries.empty:
-                st.subheader("Store Summaries")
-                st.dataframe(summaries)
-            
-            if not runs.empty:
-                st.subheader("Peddle Runs")
-                st.dataframe(runs)
-            
-            if not totals.empty:
-                st.subheader("Cube Trends")
-                st.line_chart(totals.set_index('Date'))
+            with db_connection() as (conn, c):
+                summaries, runs, totals = fetch_historical_data(query_date, c)
+
+                if not summaries.empty:
+                    st.subheader("Store Summaries")
+                    st.dataframe(summaries)
+
+                if not runs.empty:
+                    st.subheader("Peddle Runs")
+                    st.dataframe(runs)
+
+                if not totals.empty:
+                    st.subheader("Cube Trends")
+                    st.line_chart(totals.set_index('Date'))
         except Exception as e:
             st.error(f"Error fetching historical data: {e}")
-        finally:
-            if conn:
-                conn.close()
