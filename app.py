@@ -65,7 +65,6 @@ elif authentication_status is None:
 
 # Logged In Successfully
 st.success(f"Welcome, {name}! ({credentials['usernames'][username]['role'].capitalize()})")
-authenticator.logout(button_name="Logout", location="sidebar")
 
 # Get User Role
 user_role = credentials["usernames"][username]["role"]
@@ -76,6 +75,9 @@ st.write("Streamlit-powered web app for daily peddle planning. Access via browse
 
 # Sidebar Config
 with st.sidebar:
+    st.image("Logo.png", use_container_width=True)
+    st.divider()
+
     st.header("Configuration")
     departments_raw = st.text_input("Departments (e.g., 882,883,MB)", value="882,883,MB")
     departments = [d.strip() for d in departments_raw.split(",") if d.strip()]
@@ -99,6 +101,9 @@ with st.sidebar:
 
     trailer_capacity = st.number_input("Trailer Capacity", value=1600, min_value=1)
     pallet_cube = st.number_input("Cube per Pallet", value=50, min_value=1)
+
+    st.divider()
+    authenticator.logout(button_name="Logout", location="main")
 
 # Main Tabs (Conditional on Role)
 tabs = ["Data Entry", "Summary & Planning", "Actuals", "Outputs"]
