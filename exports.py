@@ -5,49 +5,83 @@ import pandas as pd
 
 
 def generate_pdf(df, departments, runs_df, date, total_cube, trailer_goal, probable_trailers):
-    """Build a PDF peddle sheet and return it as a BytesIO object.
-
-    Requires the ``fpdf2`` package (``pip install fpdf2``).
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Store-level data with STORE, departments, TOTAL, DIFF columns.
-    departments : list[str]
-        Department names.
-    runs_df : pd.DataFrame
-        Peddle runs with Time, Stores, Carrier, Total Cube, Second Trailer, Fit Note.
-    date : datetime.date
-        Sheet date.
-    total_cube, trailer_goal, probable_trailers
-        Summary metrics.
-
-    Returns
-    -------
-    io.BytesIO
-        PDF file bytes, seeked to 0.
-    """
+    """Build a one-page landscape PDF peddle sheet and return it as a BytesIO object."""
     from fpdf import FPDF
-    pdf = FPDF()
+
+    pdf = FPDF(orientation="L", format="Letter")
     pdf.add_page()
-    pdf.set_font("Arial", size=10)
+    pdf.set_auto_page_break(auto=False)
 
-    pdf.cell(200, 10, txt=f"Peddle Sheet - {date.strftime('%m/%d/%Y')}", ln=1, align="C")
+    page_w = pdf.w - pdf.l_margin - pdf.r_margin
 
-    pdf.cell(200, 10, txt="Store Data:", ln=1)
+    # --- Title ---
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(page_w, 7, txt=f"Peddle Sheet - {date.strftime('%m/%d/%Y')}", ln=1, align="C")
+    pdf.ln(2)
+
+    # --- Summary line ---
+    pdf.set_font("Arial", "", 8)
+    pdf.cell(page_w, 5,
+             txt=f"Total Cube: {total_cube:.2f}   |   Trailer Goal: {trailer_goal:.2f}   |   Probable Trailers: {probable_trailers}",
+             ln=1, align="C")
+    pdf.ln(2)
+
+    # --- Store Data Table ---
+    pdf.set_font("Arial", "B", 8)
+    pdf.cell(page_w, 5, txt="Store Data", ln=1)
+
+    store_cols = ["STORE"] + departments + ["TOTAL", "DIFF"]
+    num_store_cols = len(store_cols)
+    col_w = page_w / num_store_cols
+
+    # Header
+    pdf.set_font("Arial", "B", 7)
+    for col in store_cols:
+        pdf.cell(col_w, 5, str(col), border=1, align="C")
+    pdf.ln()
+
+    # Rows
+    pdf.set_font("Arial", "", 7)
     for _, row in df.iterrows():
-        dept_vals = ", ".join(f"{dept}: {row[dept]}" for dept in departments)
-        pdf.cell(200, 10, txt=f"STORE {row['STORE']}: {dept_vals}, TOTAL: {row['TOTAL']}, DIFF: {row['DIFF']}", ln=1)
+        for col in store_cols:
+            val = row.get(col, "")
+            if isinstance(val, float):
+                val = f"{val:.1f}"
+            pdf.cell(col_w, 4, str(val), border=1, align="C")
+        pdf.ln()
 
-    pdf.cell(200, 10, txt=f"Total Cube: {total_cube:.2f}, Trailer Goal: {trailer_goal:.2f}, Probable: {probable_trailers}", ln=1)
+    pdf.ln(3)
 
-    pdf.cell(200, 10, txt="Peddle Runs:", ln=1)
-    for _, run in runs_df.iterrows():
-        pdf.cell(200, 10,
-                 txt=f"({run['Time']}) {run['Stores']}, Carrier: {run['Carrier']}, "
-                     f"Cube: {run['Total Cube']}, Second: {run['Second Trailer']}, "
-                     f"Note: {run['Fit Note']}",
-                 ln=1)
+    # --- Peddle Runs Table ---
+    if not runs_df.empty:
+        pdf.set_font("Arial", "B", 8)
+        pdf.cell(page_w, 5, txt="Peddle Runs", ln=1)
+
+        run_cols = [c for c in ["Run", "Time", "Stores", "Carrier", "Total Cube", "Second Trailer", "Fit Note"] if c in runs_df.columns]
+        # Give more width to Stores column
+        base_w = page_w / (len(run_cols) + 2)  # +2 to give Stores extra share
+        run_col_widths = []
+        for c in run_cols:
+            if c == "Stores":
+                run_col_widths.append(base_w * 3)
+            else:
+                run_col_widths.append(base_w)
+
+        # Header
+        pdf.set_font("Arial", "B", 7)
+        for c, w in zip(run_cols, run_col_widths):
+            pdf.cell(w, 5, str(c), border=1, align="C")
+        pdf.ln()
+
+        # Rows
+        pdf.set_font("Arial", "", 7)
+        for _, row in runs_df.iterrows():
+            for c, w in zip(run_cols, run_col_widths):
+                val = row.get(c, "")
+                if isinstance(val, float):
+                    val = f"{val:.1f}"
+                pdf.cell(w, 4, str(val), border=1, align="C")
+            pdf.ln()
 
     buf = io.BytesIO()
     pdf.output(buf)
@@ -56,20 +90,26 @@ def generate_pdf(df, departments, runs_df, date, total_cube, trailer_goal, proba
 
 
 def generate_excel(df):
-    """Export a DataFrame to an Excel BytesIO buffer.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Data to export.
-
-    Returns
-    -------
-    io.BytesIO
-        Excel file bytes, seeked to 0.
-    """
+    """Export a DataFrame to an Excel BytesIO buffer, configured to print on one page."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
+        df.to_excel(writer, index=False, sheet_name="Peddle Data")
+
+        ws = writer.sheets["Peddle Data"]
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 1
+        ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+
+        # Auto-size columns
+        for col_cells in ws.columns:
+            max_len = 0
+            col_letter = col_cells[0].column_letter
+            for cell in col_cells:
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[col_letter].width = max_len + 2
+
     buf.seek(0)
     return buf

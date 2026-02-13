@@ -1,4 +1,7 @@
 import streamlit as st
+
+st.set_page_config(page_title="Peddle Sheet Generator", layout="wide")
+
 import pandas as pd
 from math import ceil
 import io
@@ -73,58 +76,132 @@ user_role = credentials["usernames"][username]["role"]
 st.title("Peddle Sheet Generator")
 st.write("Streamlit-powered web app for daily peddle planning. Access via browser—no installs needed.")
 
-# Sidebar Config
+# Hardcoded cube per pallet
+pallet_cube = 50
+
+# Initialize session state defaults
+if "departments" not in st.session_state:
+    st.session_state["departments"] = ["882", "883", "MB"]
+if "stores" not in st.session_state:
+    st.session_state["stores"] = []
+if "store_ready_times" not in st.session_state:
+    st.session_state["store_ready_times"] = {}
+if "trailer_capacity" not in st.session_state:
+    st.session_state["trailer_capacity"] = 1600
+if "fluff" not in st.session_state:
+    st.session_state["fluff"] = 50
+if "df" not in st.session_state:
+    st.session_state["df"] = pd.DataFrame()
+if "runs_df" not in st.session_state:
+    st.session_state["runs_df"] = pd.DataFrame()
+
+# Sidebar navigation
+pages = ["Settings", "Configure", "Data Entry", "Summary & Planning", "Actuals", "Outputs"]
+if user_role == "admin":
+    pages.append("History")
+
 with st.sidebar:
     st.image("logo.jpg", use_container_width=True)
     st.divider()
+    selected_page = st.radio("Navigation", pages, label_visibility="collapsed")
+    st.divider()
+    authenticator.logout(button_name="Logout", location="main")
 
-    st.header("Configuration")
-    departments_raw = st.text_input("Departments (e.g., 882,883,MB)", value="882,883,MB")
+# --- Settings Page ---
+if selected_page == "Settings":
+    st.header("Settings")
+
+    departments_raw = st.text_input(
+        "Departments (comma-separated)",
+        value=",".join(st.session_state["departments"]),
+    )
     departments = [d.strip() for d in departments_raw.split(",") if d.strip()]
     if not departments:
         st.error("Enter at least one department.")
         st.stop()
+    st.session_state["departments"] = departments
 
-    store_input_method = st.radio("Add Stores", ("Manual", "Upload List"))
-    stores = []
-    if store_input_method == "Upload List":
+    trailer_capacity = st.number_input(
+        "Trailer Capacity",
+        value=st.session_state["trailer_capacity"],
+        min_value=1,
+    )
+    st.session_state["trailer_capacity"] = trailer_capacity
+
+    fluff = st.selectbox(
+        "Fluff (extra cube buffer)",
+        options=[50, 100, 150, 200, 250],
+        index=[50, 100, 150, 200, 250].index(st.session_state["fluff"]),
+    )
+    st.session_state["fluff"] = fluff
+
+# --- Configure Page ---
+if selected_page == "Configure":
+    st.header("Configure Stores")
+    st.caption("Add, remove, or reorder stores. Changes are saved automatically.")
+
+    time_options = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+
+    if st.session_state["stores"]:
+        ready_times = [
+            st.session_state["store_ready_times"].get(s, "05:00")
+            for s in st.session_state["stores"]
+        ]
+        stores_edit_df = pd.DataFrame({"Store": st.session_state["stores"], "Ready Time": ready_times})
+    else:
+        stores_edit_df = pd.DataFrame({"Store": pd.Series(dtype="str"), "Ready Time": pd.Series(dtype="str")})
+
+    edited_stores_df = st.data_editor(
+        stores_edit_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_order=["Store", "Ready Time"],
+        column_config={
+            "Ready Time": st.column_config.SelectboxColumn(
+                "Ready Time",
+                options=time_options,
+                default="05:00",
+                required=True,
+            )
+        },
+    )
+    stores = [s.strip() for s in edited_stores_df["Store"].astype(str).tolist() if s.strip() and s.strip() != "nan"]
+    # Save ready times mapped to store names
+    ready_time_list = edited_stores_df["Ready Time"].astype(str).tolist()
+    store_names = edited_stores_df["Store"].astype(str).tolist()
+    st.session_state["store_ready_times"] = {
+        s.strip(): t for s, t in zip(store_names, ready_time_list)
+        if s.strip() and s.strip() != "nan"
+    }
+
+    with st.expander("Import stores from file"):
         store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"])
         if store_file:
-            stores_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
-            stores = [s.strip() for s in stores_df.iloc[:, 0].astype(str).tolist() if s.strip()]
-    else:
-        stores_text = st.text_area("Stores (one per line)")
-        stores = [s.strip() for s in stores_text.split("\n") if s.strip()]
+            uploaded_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
+            imported = [s.strip() for s in uploaded_df.iloc[:, 0].astype(str).tolist() if s.strip()]
+            if imported:
+                stores = imported
+                st.success(f"Imported {len(imported)} stores. They will appear after the next rerun.")
 
     if not stores:
         st.warning("Add at least one store to get started.")
+    st.session_state["stores"] = stores
 
-    trailer_capacity = st.number_input("Trailer Capacity", value=1600, min_value=1)
-    pallet_cube = st.number_input("Cube per Pallet", value=50, min_value=1)
+# Read settings from session state for all other pages
+departments = st.session_state["departments"]
+stores = st.session_state["stores"]
+trailer_capacity = st.session_state["trailer_capacity"]
+fluff = st.session_state["fluff"]
+df = st.session_state["df"]
+runs_df = st.session_state["runs_df"]
 
-    st.divider()
-    authenticator.logout(button_name="Logout", location="main")
-
-# Main Tabs (Conditional on Role)
-tabs = ["Data Entry", "Summary & Planning", "Actuals", "Outputs"]
-if user_role == "admin":
-    tabs.append("History")
-
-selected_tabs = st.tabs(tabs)
-
-data_entry_tab = selected_tabs[0]
-summary_planning_tab = selected_tabs[1]
-actuals_tab = selected_tabs[2]
-outputs_tab = selected_tabs[3]
-history_tab = selected_tabs[4] if user_role == "admin" else None
-
-with data_entry_tab:
+# --- Data Entry Page ---
+if selected_page == "Data Entry":
     st.header("Cube Data Entry")
     entry_method = st.selectbox("Entry Method", ("Manual Entry", "Upload Image/Screenshot/PDF (OCR)", "Upload CSV"))
-    
+
     data = []
-    df = pd.DataFrame()
-    
+
     if entry_method == "Upload CSV":
         csv_files = st.file_uploader("Upload one or more CSVs with cubes (columns: STORE, then each dept)", type=["csv"], accept_multiple_files=True)
         if csv_files:
@@ -139,12 +216,12 @@ with data_entry_tab:
                 except Exception as e:
                     st.error(f"Error loading {csv_file.name}: {e}")
                     continue
-            
+
             if not combined_csv_df.empty:
                 try:
                     combined_csv_df = combined_csv_df.groupby("STORE")[departments].sum().reset_index()
                     combined_csv_df["STORE"] = combined_csv_df["STORE"].astype(str)
-                    
+
                     extracted = {row["STORE"]: row for _, row in combined_csv_df.iterrows()}
                     for store in stores:
                         if store in extracted:
@@ -158,7 +235,7 @@ with data_entry_tab:
                     st.success("CSVs loaded and combined! Review and edit below.")
                 except Exception as e:
                     st.error(f"Error combining CSVs: {e}")
-    
+
     elif entry_method == "Upload Image/Screenshot/PDF (OCR)":
         upload_files = st.file_uploader("Upload one or more images/screenshots or PDFs", type=["jpg", "png", "jpeg", "pdf"], accept_multiple_files=True)
         ocr_engine = st.selectbox("OCR Engine", ("EasyOCR", "Tesseract"))
@@ -169,8 +246,8 @@ with data_entry_tab:
                     try:
                         image_bytes = upload_file.read()
                         if upload_file.type == "application/pdf":
-                            pages = convert_from_bytes(image_bytes)
-                            for i, page in enumerate(pages):
+                            pdf_pages = convert_from_bytes(image_bytes)
+                            for i, page in enumerate(pdf_pages):
                                 st.info(f"Processing page {i+1} of {upload_file.name}")
                                 preprocessed_img = preprocess_image(page)
                                 if ocr_engine == "EasyOCR":
@@ -186,11 +263,11 @@ with data_entry_tab:
                                             text = tess_data['text'][j]
                                             conf = float(tess_data['conf'][j]) / 100.0
                                             results.append((bbox, text, conf))
-                                
+
                                 extracted_texts = [text for _, text, _ in results]
                                 st.write(f"Extracted Texts Preview for {upload_file.name} page {i+1}:")
                                 st.text(", ".join(extracted_texts[:100]))
-                                
+
                                 page_data = parse_ocr_results(results, departments, stores)
                                 combined_data.extend(page_data)
                         else:
@@ -209,17 +286,17 @@ with data_entry_tab:
                                         text = tess_data['text'][j]
                                         conf = float(tess_data['conf'][j]) / 100.0
                                         results.append((bbox, text, conf))
-                            
+
                             extracted_texts = [text for _, text, _ in results]
                             st.write(f"Extracted Texts Preview for {upload_file.name}:")
                             st.text(", ".join(extracted_texts[:100]))
-                            
+
                             file_data = parse_ocr_results(results, departments, stores)
                             combined_data.extend(file_data)
                     except Exception as e:
                         st.error(f"Error processing {upload_file.name}: {e}")
                         continue
-                
+
                 if combined_data:
                     try:
                         combined_df = pd.DataFrame(combined_data)
@@ -240,7 +317,7 @@ with data_entry_tab:
                         st.success(f"Auto-filled from {len(upload_files)} files using {ocr_engine}! Edit below if needed.")
                     except Exception as e:
                         st.error(f"Error combining OCR data: {e}")
-    
+
     else:
         for store in stores:
             with st.expander(f"Store {store}"):
@@ -248,7 +325,7 @@ with data_entry_tab:
                 for dept in departments:
                     row[dept] = st.number_input(f"{dept} Cube for {store}", min_value=0.0, value=0.0)
                 data.append(row)
-    
+
     if data:
         try:
             df = pd.DataFrame(data)
@@ -257,26 +334,31 @@ with data_entry_tab:
             st.write("Data Preview (Edit if needed):")
             edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
             df = edited_df
+            st.session_state["df"] = df
         except Exception as e:
             st.error(f"Error processing data: {e}")
 
-with summary_planning_tab:
+# --- Summary & Planning Page ---
+if selected_page == "Summary & Planning":
     if not df.empty:
         try:
             total_cube = df["TOTAL"].sum()
+            total_cube_with_fluff = total_cube + fluff
             pallet_count = ceil(total_cube / pallet_cube)
-            trailer_goal = total_cube / trailer_capacity
+            trailer_goal = total_cube_with_fluff / trailer_capacity
             probable_trailers = ceil(trailer_goal * 1.1)
-            
+
             st.header("Summary")
             st.write(f"**Total Cube:** {total_cube:.2f}")
+            st.write(f"**Fluff:** {fluff}")
+            st.write(f"**Total Cube (with fluff):** {total_cube_with_fluff:.2f}")
             st.write(f"**Pallet Count:** {pallet_count}")
             st.write(f"**Trailer Goal:** {trailer_goal:.2f}")
             st.write(f"**Probable Trailers:** {probable_trailers}")
-            
+
             st.header("Peddle Run Planning")
             auto_suggest = st.checkbox("Auto-suggest Peddle Runs (greedy packing)")
-            
+
             runs_df = pd.DataFrame()
             if auto_suggest:
                 runs = auto_suggest_runs(df, trailer_capacity)
@@ -309,18 +391,23 @@ with summary_planning_tab:
                             "Fit Note": fit_note
                         })
                         available_stores = [s for s in available_stores if s not in selected_stores]
-                
+
                 runs_df = pd.DataFrame(runs)
                 st.write("Manual Runs:")
                 st.dataframe(runs_df)
+
+            st.session_state["runs_df"] = runs_df
         except Exception as e:
             st.error(f"Error in summary or planning: {e}")
+    else:
+        st.info("No data yet. Go to Data Entry first.")
 
-with actuals_tab:
+# --- Actuals Page ---
+if selected_page == "Actuals":
     st.header("Enter Actual Peddles (From Prior Day)")
     prior_date = (datetime.today() - timedelta(days=1)).date()
     st.write(f"Showing projections from {prior_date.strftime('%Y-%m-%d')}. Enter what actually happened.")
-    
+
     try:
         with db_connection() as (conn, c):
             prior_peddles_df = fetch_prior_peddles(prior_date, c)
@@ -348,12 +435,14 @@ with actuals_tab:
     except Exception as e:
         st.error(f"Error loading prior data: {e}")
 
-with outputs_tab:
+# --- Outputs Page ---
+if selected_page == "Outputs":
     if not df.empty:
         date = st.date_input("Sheet Date", datetime.today())
         total_cube = df["TOTAL"].sum()
+        total_cube_with_fluff = total_cube + fluff
         pallet_count = ceil(total_cube / pallet_cube)
-        trailer_goal = total_cube / trailer_capacity
+        trailer_goal = total_cube_with_fluff / trailer_capacity
         probable_trailers = ceil(trailer_goal * 1.1)
         if st.button("Generate PDF Sheet"):
             try:
@@ -367,7 +456,7 @@ with outputs_tab:
             st.download_button("Download Data as Excel", excel_output, file_name="ped_data.xlsx")
         except Exception as e:
             st.error(f"Error generating Excel: {e}")
-        
+
         if st.button("Save to DB"):
             try:
                 with db_connection() as (conn, c):
@@ -375,25 +464,27 @@ with outputs_tab:
                     st.success("Data saved to database!")
             except Exception as e:
                 st.error(f"Error saving to DB: {e}")
+    else:
+        st.info("No data yet. Go to Data Entry first.")
 
-if user_role == "admin":
-    with history_tab:
-        st.header("Historical Data")
-        query_date = st.date_input("View Data For", datetime.today())
-        try:
-            with db_connection() as (conn, c):
-                summaries, runs, totals = fetch_historical_data(query_date, c)
+# --- History Page (admin only) ---
+if selected_page == "History" and user_role == "admin":
+    st.header("Historical Data")
+    query_date = st.date_input("View Data For", datetime.today())
+    try:
+        with db_connection() as (conn, c):
+            summaries, runs, totals = fetch_historical_data(query_date, c)
 
-                if not summaries.empty:
-                    st.subheader("Store Summaries")
-                    st.dataframe(summaries)
+            if not summaries.empty:
+                st.subheader("Store Summaries")
+                st.dataframe(summaries)
 
-                if not runs.empty:
-                    st.subheader("Peddle Runs")
-                    st.dataframe(runs)
+            if not runs.empty:
+                st.subheader("Peddle Runs")
+                st.dataframe(runs)
 
-                if not totals.empty:
-                    st.subheader("Cube Trends")
-                    st.line_chart(totals.set_index('Date'))
-        except Exception as e:
-            st.error(f"Error fetching historical data: {e}")
+            if not totals.empty:
+                st.subheader("Cube Trends")
+                st.line_chart(totals.set_index('Date'))
+    except Exception as e:
+        st.error(f"Error fetching historical data: {e}")
