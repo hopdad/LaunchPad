@@ -137,7 +137,7 @@ if user_role == "admin":
     pages.append("History")
 
 with st.sidebar:
-    st.image("logo.jpg", use_container_width=True)
+    st.image("logo.png", use_container_width=True)
     st.divider()
     selected_page = st.radio("Navigation", pages, label_visibility="collapsed")
     st.divider()
