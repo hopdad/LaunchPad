@@ -394,6 +394,27 @@ runs_df = st.session_state["runs_df"]
 # --- Data Entry Page ---
 if selected_page == "Data Entry":
     st.header("Cube Data Entry")
+
+    # Clear data button with confirmation
+    if not st.session_state["df"].empty:
+        col_clear, col_confirm = st.columns([1, 3])
+        with col_clear:
+            if st.button("Clear Cube Data", type="secondary"):
+                st.session_state["_confirm_clear"] = True
+        if st.session_state.get("_confirm_clear"):
+            with col_confirm:
+                st.warning("Are you sure? This will erase all entered cube data.")
+                yes_col, no_col = st.columns(2)
+                with yes_col:
+                    if st.button("Yes, clear it", type="primary"):
+                        st.session_state["df"] = pd.DataFrame()
+                        st.session_state.pop("_confirm_clear", None)
+                        st.rerun()
+                with no_col:
+                    if st.button("Cancel"):
+                        st.session_state.pop("_confirm_clear", None)
+                        st.rerun()
+
     entry_method = st.selectbox("Entry Method", ("Manual Entry", "Upload Image/Screenshot/PDF (OCR)", "Upload CSV"))
 
     data = []
@@ -521,12 +542,16 @@ if selected_page == "Data Entry":
             df = pd.DataFrame(data)
             df["TOTAL"] = df[departments].sum(axis=1)
             df["DIFF"] = df["TOTAL"] - trailer_capacity
-            st.write("Data Preview (Edit if needed):")
-            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
-            df = edited_df
             st.session_state["df"] = df
         except Exception as e:
             st.error(f"Error processing data: {e}")
+
+    # Show editable preview (persists across page navigations)
+    if not st.session_state["df"].empty:
+        st.write("Data Preview (Edit if needed):")
+        edited_df = st.data_editor(st.session_state["df"], num_rows="dynamic", use_container_width=True)
+        st.session_state["df"] = edited_df
+        df = edited_df
 
 # --- Summary & Planning Page ---
 if selected_page == "Summary & Planning":
