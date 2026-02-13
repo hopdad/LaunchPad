@@ -4,6 +4,7 @@ from PIL import Image
 import pdf2image  # Unused here, but kept if needed
 import numpy as np
 import cv2
+import pandas as pd
 
 def preprocess_image(img):
     try:

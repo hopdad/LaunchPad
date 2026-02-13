@@ -9,3 +9,4 @@ pdf2image
 numpy
 opencv-python-headless
 openpyxl
+pytest
