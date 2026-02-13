@@ -17,22 +17,22 @@ credentials = {
     "usernames": {
         "clerk1": {
             "name": "Clerk User",
-            "password": stauth.Hasher(["pass123"]).generate()[0],  # Hashed password
+            "password": "pass123",
             "role": "clerk"
         },
         "clerk2": {
             "name": "Clerk User 2",
-            "password": stauth.Hasher(["pass456"]).generate()[0],
+            "password": "pass456",
             "role": "clerk"
         },
         "admin1": {
             "name": "Admin User",
-            "password": stauth.Hasher(["adminpass"]).generate()[0],
+            "password": "adminpass",
             "role": "admin"
         },
         "manager1": {
             "name": "Manager User",
-            "password": stauth.Hasher(["managerpass"]).generate()[0],
+            "password": "managerpass",
             "role": "admin"  # Same as admin for History access
         }
     }
@@ -41,12 +41,19 @@ credentials = {
 authenticator = stauth.Authenticate(
     credentials,
     cookie_name="peddle_app",
-    key="auth_key",
+    cookie_key="auth_key",
     cookie_expiry_days=30
 )
 
 # Login Form
-name, authentication_status, username = authenticator.login("Login", "main")
+try:
+    authenticator.login(location='main')
+except Exception as e:
+    st.error(e)
+
+authentication_status = st.session_state.get('authentication_status')
+name = st.session_state.get('name')
+username = st.session_state.get('username')
 
 if authentication_status is False:
     st.error("Username/password is incorrect")
@@ -57,7 +64,7 @@ elif authentication_status is None:
 
 # Logged In Successfully
 st.success(f"Welcome, {name}! ({credentials['usernames'][username]['role'].capitalize()})")
-authenticator.logout("Logout", "sidebar")  # Logout in sidebar
+authenticator.logout(button_name="Logout", location="sidebar")
 
 # Get User Role
 user_role = credentials["usernames"][username]["role"]
