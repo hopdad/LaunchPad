@@ -1,4 +1,4 @@
-![alt text]([image-url](https://github.com/hopdad/LaunchPad/blob/main/logo.jpg))
+![LaunchPad]([image-url](https://github.com/hopdad/LaunchPad/blob/main/logo.jpg))
 
 A web-based tool built with Streamlit to help manage daily shipping dock operations at a logistics/warehouse environment (specifically tailored for Meijer-style workflows).
 
