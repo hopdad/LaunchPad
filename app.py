@@ -7,8 +7,8 @@ import pandas as pd
 import streamlit_authenticator as stauth
 from db_utils import db_connection, load_settings
 
-# Pages
-from pages import (
+# Pages (directory named "views" to avoid Streamlit auto-detection)
+from views import (
     settings_page,
     configure_page,
     data_entry_page,
@@ -101,10 +101,10 @@ if "runs_df" not in st.session_state:
     st.session_state["runs_df"] = pd.DataFrame()
 
 
-# --- Sidebar Navigation ---
-pages = ["Settings", "Configure", "Data Entry", "Summary & Planning", "Actuals", "Outputs"]
+# --- Sidebar Navigation (workflow order) ---
+pages = ["Configure", "Data Entry", "Summary & Planning", "Outputs", "Actuals", "Settings"]
 if user_role == "admin":
-    pages.append("History")
+    pages.insert(5, "History")  # before Settings
 
 with st.sidebar:
     st.image("logo.jpg", use_container_width=True)
