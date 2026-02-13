@@ -10,6 +10,8 @@ from db_utils import (
     fetch_historical_data,
     fetch_prior_peddles,
     save_actual_peddles,
+    save_settings,
+    load_settings,
 )
 
 
@@ -49,6 +51,7 @@ class TestGetDbConnection:
         assert "dept_cubes" in tables
         assert "peddle_runs" in tables
         assert "actual_peddles" in tables
+        assert "app_settings" in tables
 
     def test_idempotent(self, db, tmp_path, monkeypatch):
         """Calling get_db_connection twice should not fail (CREATE IF NOT EXISTS)."""
@@ -277,3 +280,41 @@ class TestSaveActualPeddles:
         c.execute("SELECT * FROM actual_peddles")
         rows = c.fetchall()
         assert len(rows) == 2
+
+
+# --- save_settings / load_settings tests ---
+
+class TestSettings:
+    def test_save_and_load_roundtrip(self, db):
+        conn, c = db
+        save_settings({"stores": ["100", "200"], "fluff": 200}, conn, c)
+        loaded = load_settings(c)
+        assert loaded["stores"] == ["100", "200"]
+        assert loaded["fluff"] == 200
+
+    def test_load_empty(self, db):
+        conn, c = db
+        loaded = load_settings(c)
+        assert loaded == {}
+
+    def test_upsert_overwrites(self, db):
+        conn, c = db
+        save_settings({"fluff": 100}, conn, c)
+        save_settings({"fluff": 250}, conn, c)
+        loaded = load_settings(c)
+        assert loaded["fluff"] == 250
+
+    def test_dict_values_roundtrip(self, db):
+        conn, c = db
+        ready_times = {"100": "05:00", "200": "06:30"}
+        save_settings({"store_ready_times": ready_times}, conn, c)
+        loaded = load_settings(c)
+        assert loaded["store_ready_times"] == ready_times
+
+    def test_partial_update_preserves_other_keys(self, db):
+        conn, c = db
+        save_settings({"stores": ["100"], "fluff": 200}, conn, c)
+        save_settings({"fluff": 300}, conn, c)
+        loaded = load_settings(c)
+        assert loaded["stores"] == ["100"]
+        assert loaded["fluff"] == 300

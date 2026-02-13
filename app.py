@@ -7,7 +7,7 @@ from math import ceil
 import io
 from datetime import datetime, timedelta
 from utils import preprocess_image, parse_ocr_results, parse_single_dept_ocr
-from db_utils import db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles
+from db_utils import db_connection, save_data_to_db, fetch_historical_data, fetch_prior_peddles, save_actual_peddles, save_settings, load_settings
 from planning import auto_suggest_runs
 from exports import generate_pdf, generate_excel
 import streamlit_authenticator as stauth
@@ -175,17 +175,15 @@ st.write("Streamlit-powered web app for daily peddle planning. Access via browse
 # Hardcoded cube per pallet
 pallet_cube = 50
 
-# Initialize session state defaults
+# Initialize session state defaults (load persisted settings from DB)
 if "departments" not in st.session_state:
-    st.session_state["departments"] = ["882", "883", "MB"]
-if "stores" not in st.session_state:
-    st.session_state["stores"] = []
-if "store_ready_times" not in st.session_state:
-    st.session_state["store_ready_times"] = {}
-if "trailer_capacity" not in st.session_state:
-    st.session_state["trailer_capacity"] = 1600
-if "fluff" not in st.session_state:
-    st.session_state["fluff"] = 200
+    with db_connection() as (conn, c):
+        _saved = load_settings(c)
+    st.session_state["departments"] = _saved.get("departments", ["882", "883", "MB"])
+    st.session_state["stores"] = _saved.get("stores", [])
+    st.session_state["store_ready_times"] = _saved.get("store_ready_times", {})
+    st.session_state["trailer_capacity"] = _saved.get("trailer_capacity", 1600)
+    st.session_state["fluff"] = _saved.get("fluff", 200)
 if "df" not in st.session_state:
     st.session_state["df"] = pd.DataFrame()
 if "runs_df" not in st.session_state:
@@ -230,6 +228,16 @@ if selected_page == "Settings":
         index=[50, 100, 150, 200, 250, 300].index(st.session_state["fluff"]),
     )
     st.session_state["fluff"] = fluff
+
+    # Persist settings to DB
+    with db_connection() as (conn, c):
+        save_settings({
+            "departments": st.session_state["departments"],
+            "trailer_capacity": st.session_state["trailer_capacity"],
+            "fluff": st.session_state["fluff"],
+            "stores": st.session_state["stores"],
+            "store_ready_times": st.session_state["store_ready_times"],
+        }, conn, c)
 
 # --- Configure Page ---
 if selected_page == "Configure":
@@ -280,6 +288,11 @@ if selected_page == "Configure":
             if s.strip() and s.strip() != "nan"
         }
         st.session_state["stores"] = edited_stores
+        with db_connection() as (conn, c):
+            save_settings({
+                "stores": st.session_state["stores"],
+                "store_ready_times": st.session_state["store_ready_times"],
+            }, conn, c)
 
     # --- Import from file (with diff review) ---
     with st.expander("Import stores from file"):
@@ -354,6 +367,11 @@ if selected_page == "Configure":
                         added = sum(1 for v in st.session_state.get("_pending_adds", {}).values() if v)
                         removed = sum(1 for v in st.session_state.get("_pending_removes", {}).values() if v)
                         st.session_state["stores"] = new_stores
+                        with db_connection() as (conn, c):
+                            save_settings({
+                                "stores": st.session_state["stores"],
+                                "store_ready_times": st.session_state["store_ready_times"],
+                            }, conn, c)
                         # Clean up temp state
                         for k in ("_import_file_id", "_pending_adds", "_pending_removes", "_imported_ready_times"):
                             st.session_state.pop(k, None)
@@ -376,6 +394,27 @@ runs_df = st.session_state["runs_df"]
 # --- Data Entry Page ---
 if selected_page == "Data Entry":
     st.header("Cube Data Entry")
+
+    # Clear data button with confirmation
+    if not st.session_state["df"].empty:
+        col_clear, col_confirm = st.columns([1, 3])
+        with col_clear:
+            if st.button("Clear Cube Data", type="secondary"):
+                st.session_state["_confirm_clear"] = True
+        if st.session_state.get("_confirm_clear"):
+            with col_confirm:
+                st.warning("Are you sure? This will erase all entered cube data.")
+                yes_col, no_col = st.columns(2)
+                with yes_col:
+                    if st.button("Yes, clear it", type="primary"):
+                        st.session_state["df"] = pd.DataFrame()
+                        st.session_state.pop("_confirm_clear", None)
+                        st.rerun()
+                with no_col:
+                    if st.button("Cancel"):
+                        st.session_state.pop("_confirm_clear", None)
+                        st.rerun()
+
     entry_method = st.selectbox("Entry Method", ("Manual Entry", "Upload Image/Screenshot/PDF (OCR)", "Upload CSV"))
 
     data = []
@@ -495,7 +534,7 @@ if selected_page == "Data Entry":
             with st.expander(f"Store {store}"):
                 row = {"STORE": store}
                 for dept in departments:
-                    row[dept] = st.number_input(f"{dept} Cube for {store}", min_value=0.0, value=0.0, key=f"manual_{store}_{dept}")
+                    row[dept] = st.number_input(f"{dept} Cube for {store}", min_value=0, value=0, step=50, key=f"manual_{store}_{dept}")
                 data.append(row)
 
     if data:
@@ -503,12 +542,16 @@ if selected_page == "Data Entry":
             df = pd.DataFrame(data)
             df["TOTAL"] = df[departments].sum(axis=1)
             df["DIFF"] = df["TOTAL"] - trailer_capacity
-            st.write("Data Preview (Edit if needed):")
-            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
-            df = edited_df
             st.session_state["df"] = df
         except Exception as e:
             st.error(f"Error processing data: {e}")
+
+    # Show editable preview (persists across page navigations)
+    if not st.session_state["df"].empty:
+        st.write("Data Preview (Edit if needed):")
+        edited_df = st.data_editor(st.session_state["df"], num_rows="dynamic", use_container_width=True)
+        st.session_state["df"] = edited_df
+        df = edited_df
 
 # --- Summary & Planning Page ---
 if selected_page == "Summary & Planning":
