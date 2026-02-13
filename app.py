@@ -116,19 +116,26 @@ if selected_page == "Settings":
         st.stop()
     st.session_state["departments"] = departments
 
-    store_input_method = st.radio("Add Stores", ("Manual", "Upload List"))
-    stores = []
-    if store_input_method == "Upload List":
+    st.subheader("Stores")
+    stores_edit_df = pd.DataFrame(
+        {"Store": st.session_state["stores"]} if st.session_state["stores"] else {"Store": []},
+    )
+    edited_stores_df = st.data_editor(
+        stores_edit_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_order=["Store"],
+    )
+    stores = [s.strip() for s in edited_stores_df["Store"].astype(str).tolist() if s.strip() and s.strip() != "nan"]
+
+    with st.expander("Import stores from file"):
         store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"])
         if store_file:
-            stores_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
-            stores = [s.strip() for s in stores_df.iloc[:, 0].astype(str).tolist() if s.strip()]
-    else:
-        stores_text = st.text_area(
-            "Stores (one per line)",
-            value="\n".join(st.session_state["stores"]),
-        )
-        stores = [s.strip() for s in stores_text.split("\n") if s.strip()]
+            uploaded_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
+            imported = [s.strip() for s in uploaded_df.iloc[:, 0].astype(str).tolist() if s.strip()]
+            if imported:
+                stores = imported
+                st.success(f"Imported {len(imported)} stores. They will appear after the next rerun.")
 
     if not stores:
         st.warning("Add at least one store to get started.")
