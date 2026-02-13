@@ -15,6 +15,42 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 import easyocr
 import pytesseract
+import re
+
+
+def _is_store_number(val: str) -> bool:
+    """Return True if *val* looks like a store number (purely numeric, 1-5 digits)."""
+    return bool(re.fullmatch(r"\d{1,5}", val))
+
+
+def _extract_stores_from_file(store_file) -> list[str]:
+    """Extract store numbers from an uploaded CSV/Excel file.
+
+    Scans all sheets (for Excel) and all columns to find cells that look
+    like store numbers.  Ignores headers, NaN, and non-numeric text like
+    "canceled loads".
+    """
+    if store_file.name.endswith(".csv"):
+        frames = [pd.read_csv(store_file, header=None)]
+    else:
+        # Read every sheet so we find data regardless of which sheet it's on
+        xls = pd.read_excel(store_file, sheet_name=None, header=None)
+        frames = list(xls.values())
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for frame in frames:
+        for col in frame.columns:
+            for val in frame[col].dropna():
+                s = str(val).strip()
+                # Numbers from pandas may come as "100.0" — normalise
+                if re.fullmatch(r"\d+\.0", s):
+                    s = s.split(".")[0]
+                if _is_store_number(s) and s not in seen:
+                    found.append(s)
+                    seen.add(s)
+    return found
+
 
 # Auth Setup (hardcoded for now; use secrets.toml in prod)
 credentials = {
@@ -138,54 +174,131 @@ if selected_page == "Settings":
 # --- Configure Page ---
 if selected_page == "Configure":
     st.header("Configure Stores")
-    st.caption("Add, remove, or reorder stores. Changes are saved automatically.")
 
     time_options = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 
+    # --- Current lineup summary (always visible, read-only) ---
     if st.session_state["stores"]:
-        ready_times = [
-            st.session_state["store_ready_times"].get(s, "05:00")
-            for s in st.session_state["stores"]
-        ]
-        stores_edit_df = pd.DataFrame({"Store": st.session_state["stores"], "Ready Time": ready_times})
+        st.subheader(f"Current Lineup ({len(st.session_state['stores'])} stores)")
+        st.info(", ".join(st.session_state["stores"]))
     else:
-        stores_edit_df = pd.DataFrame({"Store": pd.Series(dtype="str"), "Ready Time": pd.Series(dtype="str")})
+        st.warning("No stores configured yet. Use the editor or import a file below.")
 
-    edited_stores_df = st.data_editor(
-        stores_edit_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_order=["Store", "Ready Time"],
-        column_config={
-            "Ready Time": st.column_config.SelectboxColumn(
-                "Ready Time",
-                options=time_options,
-                default="05:00",
-                required=True,
-            )
-        },
-    )
-    stores = [s.strip() for s in edited_stores_df["Store"].astype(str).tolist() if s.strip() and s.strip() != "nan"]
-    # Save ready times mapped to store names
-    ready_time_list = edited_stores_df["Ready Time"].astype(str).tolist()
-    store_names = edited_stores_df["Store"].astype(str).tolist()
-    st.session_state["store_ready_times"] = {
-        s.strip(): t for s, t in zip(store_names, ready_time_list)
-        if s.strip() and s.strip() != "nan"
-    }
+    # --- Edit lineup manually (only when toggled) ---
+    edit_lineup = st.checkbox("Edit Store Lineup", key="edit_lineup_toggle")
+    if edit_lineup:
+        st.caption("Add, remove, or reorder stores and ready times.")
+        if st.session_state["stores"]:
+            ready_times = [
+                st.session_state["store_ready_times"].get(s, "05:00")
+                for s in st.session_state["stores"]
+            ]
+            stores_edit_df = pd.DataFrame({"Store": st.session_state["stores"], "Ready Time": ready_times})
+        else:
+            stores_edit_df = pd.DataFrame({"Store": pd.Series(dtype="str"), "Ready Time": pd.Series(dtype="str")})
 
+        edited_stores_df = st.data_editor(
+            stores_edit_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_order=["Store", "Ready Time"],
+            column_config={
+                "Ready Time": st.column_config.SelectboxColumn(
+                    "Ready Time",
+                    options=time_options,
+                    default="05:00",
+                    required=True,
+                )
+            },
+            key="stores_data_editor",
+        )
+        edited_stores = [s.strip() for s in edited_stores_df["Store"].astype(str).tolist() if s.strip() and s.strip() != "nan"]
+        ready_time_list = edited_stores_df["Ready Time"].astype(str).tolist()
+        store_names = edited_stores_df["Store"].astype(str).tolist()
+        st.session_state["store_ready_times"] = {
+            s.strip(): t for s, t in zip(store_names, ready_time_list)
+            if s.strip() and s.strip() != "nan"
+        }
+        st.session_state["stores"] = edited_stores
+
+    # --- Import from file (with diff review) ---
     with st.expander("Import stores from file"):
-        store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"])
+        store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"], key="store_file_uploader")
         if store_file:
-            uploaded_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
-            imported = [s.strip() for s in uploaded_df.iloc[:, 0].astype(str).tolist() if s.strip()]
+            imported = _extract_stores_from_file(store_file)
             if imported:
-                stores = imported
-                st.success(f"Imported {len(imported)} stores. They will appear after the next rerun.")
+                current_set = set(st.session_state["stores"])
+                incoming_set = set(imported)
 
-    if not stores:
+                adds = sorted(incoming_set - current_set)
+                removes = sorted(current_set - incoming_set)
+                keeps = sorted(current_set & incoming_set)
+
+                if not adds and not removes:
+                    st.success("Uploaded store list matches current lineup. No changes needed.")
+                else:
+                    st.write("**Review proposed changes:**")
+
+                    # Track which file we last diffed so checkboxes reset on new upload
+                    file_id = f"{store_file.name}_{store_file.size}"
+                    if st.session_state.get("_import_file_id") != file_id:
+                        st.session_state["_import_file_id"] = file_id
+                        st.session_state["_pending_adds"] = {s: True for s in adds}
+                        st.session_state["_pending_removes"] = {s: True for s in removes}
+
+                    if adds:
+                        st.markdown(f"**Stores to ADD ({len(adds)}):**")
+                        for s in adds:
+                            st.session_state["_pending_adds"][s] = st.checkbox(
+                                f"Add store {s}",
+                                value=st.session_state.get("_pending_adds", {}).get(s, True),
+                                key=f"import_add_{s}",
+                            )
+
+                    if removes:
+                        st.markdown(f"**Stores to REMOVE ({len(removes)}):**")
+                        for s in removes:
+                            st.session_state["_pending_removes"][s] = st.checkbox(
+                                f"Remove store {s}",
+                                value=st.session_state.get("_pending_removes", {}).get(s, True),
+                                key=f"import_remove_{s}",
+                            )
+
+                    if keeps:
+                        st.caption(f"Unchanged stores ({len(keeps)}): {', '.join(keeps)}")
+
+                    if st.button("Apply Changes", key="apply_store_import"):
+                        new_stores = list(st.session_state["stores"])
+                        # Apply adds
+                        for s, checked in st.session_state.get("_pending_adds", {}).items():
+                            if checked and s not in new_stores:
+                                new_stores.append(s)
+                        # Apply removes
+                        for s, checked in st.session_state.get("_pending_removes", {}).items():
+                            if checked and s in new_stores:
+                                new_stores.remove(s)
+                        # Default ready times for new stores
+                        for s in new_stores:
+                            if s not in st.session_state["store_ready_times"]:
+                                st.session_state["store_ready_times"][s] = "05:00"
+                        # Clean up ready times for removed stores
+                        st.session_state["store_ready_times"] = {
+                            s: t for s, t in st.session_state["store_ready_times"].items()
+                            if s in new_stores
+                        }
+                        added = sum(1 for v in st.session_state.get("_pending_adds", {}).values() if v)
+                        removed = sum(1 for v in st.session_state.get("_pending_removes", {}).values() if v)
+                        st.session_state["stores"] = new_stores
+                        # Clean up temp state
+                        for k in ("_import_file_id", "_pending_adds", "_pending_removes"):
+                            st.session_state.pop(k, None)
+                        st.success(f"Applied: {added} added, {removed} removed. {len(new_stores)} stores total.")
+                        st.rerun()
+            else:
+                st.warning("No valid store numbers found in the uploaded file.")
+
+    if not st.session_state["stores"]:
         st.warning("Add at least one store to get started.")
-    st.session_state["stores"] = stores
 
 # Read settings from session state for all other pages
 departments = st.session_state["departments"]
@@ -323,7 +436,7 @@ if selected_page == "Data Entry":
             with st.expander(f"Store {store}"):
                 row = {"STORE": store}
                 for dept in departments:
-                    row[dept] = st.number_input(f"{dept} Cube for {store}", min_value=0.0, value=0.0)
+                    row[dept] = st.number_input(f"{dept} Cube for {store}", min_value=0.0, value=0.0, key=f"manual_{store}_{dept}")
                 data.append(row)
 
     if data:
