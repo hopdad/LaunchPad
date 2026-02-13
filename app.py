@@ -23,33 +23,93 @@ def _is_store_number(val: str) -> bool:
     return bool(re.fullmatch(r"\d{1,5}", val))
 
 
-def _extract_stores_from_file(store_file) -> list[str]:
-    """Extract store numbers from an uploaded CSV/Excel file.
+def _normalize_time(val) -> str:
+    """Best-effort convert a cell value to an HH:MM string."""
+    if pd.isna(val):
+        return "05:00"
+    # datetime.time or Timestamp objects
+    if hasattr(val, "strftime"):
+        return val.strftime("%H:%M")
+    s = str(val).strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    return "05:00"
 
-    Scans all sheets (for Excel) and all columns to find cells that look
-    like store numbers.  Ignores headers, NaN, and non-numeric text like
-    "canceled loads".
+
+def _extract_stores_from_file(store_file) -> dict[str, str]:
+    """Extract store numbers and ready times from an uploaded CSV/Excel file.
+
+    Finds columns named "Store" (exact, case-insensitive) and columns whose
+    name starts with "R-Time", "R- Time", or "Ready Time" (case-insensitive).
+    Supports multiple side-by-side tables on the same sheet (each with its
+    own Store / R-Time pair).
+
+    Returns an ordered dict of {store_number: ready_time} (e.g. {"32": "17:30"}).
+    Stores without a matched ready-time column default to "05:00".
     """
     if store_file.name.endswith(".csv"):
         frames = [pd.read_csv(store_file, header=None)]
     else:
-        # Read every sheet so we find data regardless of which sheet it's on
         xls = pd.read_excel(store_file, sheet_name=None, header=None)
         frames = list(xls.values())
 
-    found: list[str] = []
-    seen: set[str] = set()
+    result: dict[str, str] = {}
+
     for frame in frames:
-        for col in frame.columns:
-            for val in frame[col].dropna():
-                s = str(val).strip()
-                # Numbers from pandas may come as "100.0" — normalise
-                if re.fullmatch(r"\d+\.0", s):
-                    s = s.split(".")[0]
-                if _is_store_number(s) and s not in seen:
-                    found.append(s)
-                    seen.add(s)
-    return found
+        # --- Locate the header row (first row containing a "store" cell) ---
+        header_idx = None
+        for idx, row in frame.iterrows():
+            if any(str(v).strip().lower() == "store" for v in row.values):
+                header_idx = idx
+                break
+        if header_idx is None:
+            continue
+
+        headers = [str(v).strip() for v in frame.iloc[header_idx].values]
+
+        # --- Identify Store columns and R-Time columns by position ---
+        store_cols: list[int] = []
+        rtime_cols: list[int] = []
+        for i, h in enumerate(headers):
+            if h.lower() == "store":
+                store_cols.append(i)
+            else:
+                # Normalise away spaces/dashes to match variants like
+                # "R-Time", "R- Time", "Ready Time", "ReadyTime", etc.
+                norm = re.sub(r"[\s\-]", "", h.lower())
+                if norm.startswith("rtime") or norm.startswith("readytime"):
+                    rtime_cols.append(i)
+
+        if not store_cols:
+            continue
+
+        # Pair each Store column with the nearest R-Time column to its right
+        pairs: list[tuple[int, int | None]] = []
+        for sc in store_cols:
+            matched = None
+            for rc in rtime_cols:
+                if rc > sc:
+                    matched = rc
+                    break
+            pairs.append((sc, matched))
+
+        # --- Extract data rows below the header ---
+        data_rows = frame.iloc[header_idx + 1:]
+        for sc, rc in pairs:
+            for _, row in data_rows.iterrows():
+                raw = str(row.iloc[sc]).strip()
+                # Normalise pandas float representation "100.0" -> "100"
+                if re.fullmatch(r"\d+\.0", raw):
+                    raw = raw.split(".")[0]
+                if not _is_store_number(raw):
+                    continue
+                if raw in result:
+                    continue  # first occurrence wins
+                ready_time = _normalize_time(row.iloc[rc]) if rc is not None else "05:00"
+                result[raw] = ready_time
+
+    return result
 
 
 # Auth Setup (hardcoded for now; use secrets.toml in prod)
@@ -125,7 +185,7 @@ if "store_ready_times" not in st.session_state:
 if "trailer_capacity" not in st.session_state:
     st.session_state["trailer_capacity"] = 1600
 if "fluff" not in st.session_state:
-    st.session_state["fluff"] = 50
+    st.session_state["fluff"] = 200
 if "df" not in st.session_state:
     st.session_state["df"] = pd.DataFrame()
 if "runs_df" not in st.session_state:
@@ -166,8 +226,8 @@ if selected_page == "Settings":
 
     fluff = st.selectbox(
         "Fluff (extra cube buffer)",
-        options=[50, 100, 150, 200, 250],
-        index=[50, 100, 150, 200, 250].index(st.session_state["fluff"]),
+        options=[50, 100, 150, 200, 250, 300],
+        index=[50, 100, 150, 200, 250, 300].index(st.session_state["fluff"]),
     )
     st.session_state["fluff"] = fluff
 
@@ -228,7 +288,7 @@ if selected_page == "Configure":
             imported = _extract_stores_from_file(store_file)
             if imported:
                 current_set = set(st.session_state["stores"])
-                incoming_set = set(imported)
+                incoming_set = set(imported.keys())
 
                 adds = sorted(incoming_set - current_set)
                 removes = sorted(current_set - incoming_set)
@@ -245,12 +305,14 @@ if selected_page == "Configure":
                         st.session_state["_import_file_id"] = file_id
                         st.session_state["_pending_adds"] = {s: True for s in adds}
                         st.session_state["_pending_removes"] = {s: True for s in removes}
+                        st.session_state["_imported_ready_times"] = dict(imported)
 
                     if adds:
                         st.markdown(f"**Stores to ADD ({len(adds)}):**")
                         for s in adds:
+                            rt = imported.get(s, "05:00")
                             st.session_state["_pending_adds"][s] = st.checkbox(
-                                f"Add store {s}",
+                                f"Add store {s} (ready {rt})",
                                 value=st.session_state.get("_pending_adds", {}).get(s, True),
                                 key=f"import_add_{s}",
                             )
@@ -268,6 +330,7 @@ if selected_page == "Configure":
                         st.caption(f"Unchanged stores ({len(keeps)}): {', '.join(keeps)}")
 
                     if st.button("Apply Changes", key="apply_store_import"):
+                        imported_times = st.session_state.get("_imported_ready_times", {})
                         new_stores = list(st.session_state["stores"])
                         # Apply adds
                         for s, checked in st.session_state.get("_pending_adds", {}).items():
@@ -277,9 +340,11 @@ if selected_page == "Configure":
                         for s, checked in st.session_state.get("_pending_removes", {}).items():
                             if checked and s in new_stores:
                                 new_stores.remove(s)
-                        # Default ready times for new stores
+                        # Set ready times from the file for new stores; update kept stores too
                         for s in new_stores:
-                            if s not in st.session_state["store_ready_times"]:
+                            if s in imported_times:
+                                st.session_state["store_ready_times"][s] = imported_times[s]
+                            elif s not in st.session_state["store_ready_times"]:
                                 st.session_state["store_ready_times"][s] = "05:00"
                         # Clean up ready times for removed stores
                         st.session_state["store_ready_times"] = {
@@ -290,12 +355,12 @@ if selected_page == "Configure":
                         removed = sum(1 for v in st.session_state.get("_pending_removes", {}).values() if v)
                         st.session_state["stores"] = new_stores
                         # Clean up temp state
-                        for k in ("_import_file_id", "_pending_adds", "_pending_removes"):
+                        for k in ("_import_file_id", "_pending_adds", "_pending_removes", "_imported_ready_times"):
                             st.session_state.pop(k, None)
                         st.success(f"Applied: {added} added, {removed} removed. {len(new_stores)} stores total.")
                         st.rerun()
             else:
-                st.warning("No valid store numbers found in the uploaded file.")
+                st.warning("No store numbers found. Make sure the file has a column named **Store**.")
 
     if not st.session_state["stores"]:
         st.warning("Add at least one store to get started.")
