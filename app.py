@@ -81,6 +81,8 @@ if "departments" not in st.session_state:
     st.session_state["departments"] = ["882", "883", "MB"]
 if "stores" not in st.session_state:
     st.session_state["stores"] = []
+if "store_ready_times" not in st.session_state:
+    st.session_state["store_ready_times"] = {}
 if "trailer_capacity" not in st.session_state:
     st.session_state["trailer_capacity"] = 1600
 if "fluff" not in st.session_state:
@@ -135,16 +137,39 @@ if selected_page == "Configure":
     st.header("Configure Stores")
     st.caption("Add, remove, or reorder stores. Changes are saved automatically.")
 
-    stores_edit_df = pd.DataFrame(
-        {"Store": st.session_state["stores"]} if st.session_state["stores"] else {"Store": []},
-    )
+    time_options = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+
+    if st.session_state["stores"]:
+        ready_times = [
+            st.session_state["store_ready_times"].get(s, "05:00")
+            for s in st.session_state["stores"]
+        ]
+        stores_edit_df = pd.DataFrame({"Store": st.session_state["stores"], "Ready Time": ready_times})
+    else:
+        stores_edit_df = pd.DataFrame({"Store": pd.Series(dtype="str"), "Ready Time": pd.Series(dtype="str")})
+
     edited_stores_df = st.data_editor(
         stores_edit_df,
         num_rows="dynamic",
         use_container_width=True,
-        column_order=["Store"],
+        column_order=["Store", "Ready Time"],
+        column_config={
+            "Ready Time": st.column_config.SelectboxColumn(
+                "Ready Time",
+                options=time_options,
+                default="05:00",
+                required=True,
+            )
+        },
     )
     stores = [s.strip() for s in edited_stores_df["Store"].astype(str).tolist() if s.strip() and s.strip() != "nan"]
+    # Save ready times mapped to store names
+    ready_time_list = edited_stores_df["Ready Time"].astype(str).tolist()
+    store_names = edited_stores_df["Store"].astype(str).tolist()
+    st.session_state["store_ready_times"] = {
+        s.strip(): t for s, t in zip(store_names, ready_time_list)
+        if s.strip() and s.strip() != "nan"
+    }
 
     with st.expander("Import stores from file"):
         store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"])
