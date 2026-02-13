@@ -15,6 +15,42 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 import easyocr
 import pytesseract
+import re
+
+
+def _is_store_number(val: str) -> bool:
+    """Return True if *val* looks like a store number (purely numeric, 1-5 digits)."""
+    return bool(re.fullmatch(r"\d{1,5}", val))
+
+
+def _extract_stores_from_file(store_file) -> list[str]:
+    """Extract store numbers from an uploaded CSV/Excel file.
+
+    Scans all sheets (for Excel) and all columns to find cells that look
+    like store numbers.  Ignores headers, NaN, and non-numeric text like
+    "canceled loads".
+    """
+    if store_file.name.endswith(".csv"):
+        frames = [pd.read_csv(store_file, header=None)]
+    else:
+        # Read every sheet so we find data regardless of which sheet it's on
+        xls = pd.read_excel(store_file, sheet_name=None, header=None)
+        frames = list(xls.values())
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for frame in frames:
+        for col in frame.columns:
+            for val in frame[col].dropna():
+                s = str(val).strip()
+                # Numbers from pandas may come as "100.0" — normalise
+                if re.fullmatch(r"\d+\.0", s):
+                    s = s.split(".")[0]
+                if _is_store_number(s) and s not in seen:
+                    found.append(s)
+                    seen.add(s)
+    return found
+
 
 # Auth Setup (hardcoded for now; use secrets.toml in prod)
 credentials = {
@@ -177,11 +213,12 @@ if selected_page == "Configure":
     with st.expander("Import stores from file"):
         store_file = st.file_uploader("Upload stores (CSV/Excel)", type=["csv", "xlsx"])
         if store_file:
-            uploaded_df = pd.read_csv(store_file) if store_file.name.endswith(".csv") else pd.read_excel(store_file)
-            imported = [s.strip() for s in uploaded_df.iloc[:, 0].astype(str).tolist() if s.strip()]
+            imported = _extract_stores_from_file(store_file)
             if imported:
                 stores = imported
-                st.success(f"Imported {len(imported)} stores. They will appear after the next rerun.")
+                st.success(f"Imported {len(imported)} stores: {', '.join(imported)}")
+            else:
+                st.warning("No valid store numbers found in the uploaded file.")
 
     if not stores:
         st.warning("Add at least one store to get started.")
