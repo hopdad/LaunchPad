@@ -1,6 +1,61 @@
-"""Peddle run planning logic (bin-packing + overs routing)."""
+"""Peddle run planning logic (bin-packing + overs routing + distance sequencing)."""
 
+import math
 import pandas as pd
+
+
+# --- Haversine distance ---
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Return the great-circle distance in miles between two (lat, lng) points."""
+    R = 3958.8  # Earth radius in miles
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def sequence_stores(stores, store_locations, dc_location, order="furthest_first"):
+    """Sort a list of store numbers by distance from the DC.
+
+    Parameters
+    ----------
+    stores : list[str]
+        Store numbers to sequence.
+    store_locations : dict
+        {store: (lat, lng)} mapping.
+    dc_location : tuple
+        (lat, lng) of the distribution center / home base.
+    order : str
+        ``"furthest_first"`` (default) or ``"closest_first"``.
+
+    Returns
+    -------
+    list[str]
+        Store numbers sorted by distance.  Stores without coordinates
+        are appended at the end in their original order.
+    """
+    if not dc_location or not store_locations:
+        return stores
+
+    dc_lat, dc_lng = dc_location
+    with_dist = []
+    without_coords = []
+
+    for s in stores:
+        loc = store_locations.get(s)
+        if loc:
+            d = haversine(dc_lat, dc_lng, loc[0], loc[1])
+            with_dist.append((s, d))
+        else:
+            without_coords.append(s)
+
+    descending = order == "furthest_first"
+    with_dist.sort(key=lambda x: x[1], reverse=descending)
+
+    return [s for s, _ in with_dist] + without_coords
 
 
 def auto_suggest_runs(df, trailer_capacity, store_ready_times=None):
@@ -71,6 +126,21 @@ def _ffd_pack(df, trailer_capacity):
         }
         for r in runs
     ]
+
+
+def sequence_runs(runs, store_locations, dc_location, order="furthest_first"):
+    """Apply distance sequencing to the Stores field of each run dict.
+
+    Modifies runs in-place and returns them for convenience.
+    If locations are missing, runs are returned unchanged.
+    """
+    if not store_locations or not dc_location:
+        return runs
+    for r in runs:
+        stores = [s.strip() for s in r["Stores"].split("/") if s.strip()]
+        ordered = sequence_stores(stores, store_locations, dc_location, order)
+        r["Stores"] = "/".join(ordered)
+    return runs
 
 
 # --- Overs-based peddle run planning ---

@@ -1,7 +1,14 @@
 import pytest
 import pandas as pd
 
-from planning import auto_suggest_runs, extract_overs, auto_suggest_overs_runs
+from planning import (
+    auto_suggest_runs,
+    extract_overs,
+    auto_suggest_overs_runs,
+    haversine,
+    sequence_stores,
+    sequence_runs,
+)
 
 
 class TestAutoSuggestRuns:
@@ -240,3 +247,108 @@ class TestAutoSuggestOversRuns:
         assert len(runs) == 1
         assert runs[0]["Total Cube"] == 2400
         assert runs[0]["Second Trailer"] == "Yes"
+
+
+# --- Haversine distance tests ---
+
+class TestHaversine:
+    def test_same_point_is_zero(self):
+        assert haversine(40.0, -74.0, 40.0, -74.0) == 0.0
+
+    def test_known_distance(self):
+        # NYC to LA ~2451 miles (great-circle)
+        d = haversine(40.7128, -74.0060, 33.9425, -118.4081)
+        assert 2400 < d < 2500
+
+    def test_short_distance(self):
+        # ~1 mile apart (roughly 0.0145 degrees lat)
+        d = haversine(40.0, -74.0, 40.0145, -74.0)
+        assert 0.9 < d < 1.1
+
+    def test_symmetrical(self):
+        d1 = haversine(40.0, -74.0, 33.0, -118.0)
+        d2 = haversine(33.0, -118.0, 40.0, -74.0)
+        assert abs(d1 - d2) < 0.001
+
+
+# --- Sequence stores tests ---
+
+class TestSequenceStores:
+    # DC at origin-ish location (0,0), stores at varying distances
+    DC = (40.0, -74.0)
+    LOCATIONS = {
+        "100": (40.1, -74.0),   # ~7 miles north
+        "200": (41.0, -74.0),   # ~69 miles north
+        "300": (40.5, -74.0),   # ~35 miles north
+    }
+
+    def test_furthest_first(self):
+        result = sequence_stores(
+            ["100", "200", "300"], self.LOCATIONS, self.DC, order="furthest_first"
+        )
+        assert result == ["200", "300", "100"]
+
+    def test_closest_first(self):
+        result = sequence_stores(
+            ["100", "200", "300"], self.LOCATIONS, self.DC, order="closest_first"
+        )
+        assert result == ["100", "300", "200"]
+
+    def test_missing_coords_appended_at_end(self):
+        result = sequence_stores(
+            ["100", "999", "200"], self.LOCATIONS, self.DC, order="furthest_first"
+        )
+        assert result[-1] == "999"
+        assert result[0] == "200"
+
+    def test_no_locations_returns_unchanged(self):
+        result = sequence_stores(["100", "200"], {}, self.DC)
+        assert result == ["100", "200"]
+
+    def test_no_dc_returns_unchanged(self):
+        result = sequence_stores(["100", "200"], self.LOCATIONS, None)
+        assert result == ["100", "200"]
+
+    def test_single_store(self):
+        result = sequence_stores(["100"], self.LOCATIONS, self.DC)
+        assert result == ["100"]
+
+    def test_empty_list(self):
+        result = sequence_stores([], self.LOCATIONS, self.DC)
+        assert result == []
+
+
+# --- Sequence runs tests ---
+
+class TestSequenceRuns:
+    DC = (40.0, -74.0)
+    LOCATIONS = {
+        "100": (40.1, -74.0),
+        "200": (41.0, -74.0),
+        "300": (40.5, -74.0),
+    }
+
+    def test_sequences_stores_in_run(self):
+        runs = [{"Stores": "100/200/300", "Total Cube": 1000, "Second Trailer": "No"}]
+        sequence_runs(runs, self.LOCATIONS, self.DC, order="furthest_first")
+        assert runs[0]["Stores"] == "200/300/100"
+
+    def test_multiple_runs_sequenced(self):
+        runs = [
+            {"Stores": "100/200", "Total Cube": 500, "Second Trailer": "No"},
+            {"Stores": "300/100", "Total Cube": 600, "Second Trailer": "No"},
+        ]
+        sequence_runs(runs, self.LOCATIONS, self.DC, order="furthest_first")
+        assert runs[0]["Stores"] == "200/100"
+        # 300 is further than 100
+        assert runs[1]["Stores"] == "300/100"
+
+    def test_no_locations_unchanged(self):
+        runs = [{"Stores": "100/200", "Total Cube": 500, "Second Trailer": "No"}]
+        sequence_runs(runs, {}, self.DC)
+        assert runs[0]["Stores"] == "100/200"
+
+    def test_closest_first_order(self):
+        runs = [{"Stores": "100/200/300", "Total Cube": 1000, "Second Trailer": "No"}]
+        sequence_runs(runs, self.LOCATIONS, self.DC, order="closest_first")
+        assert runs[0]["Stores"] == "100/300/200"

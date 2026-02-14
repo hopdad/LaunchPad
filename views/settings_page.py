@@ -1,9 +1,16 @@
-"""Settings page — departments, trailer capacity, fluff, store zones."""
+"""Settings page — departments, trailer capacity, fluff, store zones, store locations."""
 
 import logging
 import pandas as pd
 import streamlit as st
-from db_utils import db_connection, save_settings, save_store_zones, load_store_zones
+from db_utils import (
+    db_connection,
+    save_settings,
+    save_store_zones,
+    load_store_zones,
+    save_store_locations,
+    load_store_locations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,3 +109,89 @@ def render():
         except Exception:
             logger.exception("Failed to save store zones")
             st.error("Could not save zones to database.")
+
+    # --- DC Home Base Location ---
+    st.divider()
+    st.header("DC / Home Base Location")
+    st.caption(
+        "Enter the lat/lng of your distribution center. "
+        "This is used to calculate distances for ordering stores within peddle runs."
+    )
+
+    saved_dc = st.session_state.get("dc_location") or (None, None)
+    dc_col1, dc_col2 = st.columns(2)
+    with dc_col1:
+        dc_lat = st.number_input(
+            "DC Latitude",
+            value=saved_dc[0] if saved_dc[0] is not None else 0.0,
+            format="%.6f",
+            key="dc_lat_input",
+        )
+    with dc_col2:
+        dc_lng = st.number_input(
+            "DC Longitude",
+            value=saved_dc[1] if saved_dc[1] is not None else 0.0,
+            format="%.6f",
+            key="dc_lng_input",
+        )
+
+    if st.button("Save DC Location", key="save_dc_btn"):
+        st.session_state["dc_location"] = (dc_lat, dc_lng)
+        try:
+            with db_connection() as (conn, c):
+                save_settings({"dc_location": [dc_lat, dc_lng]}, conn, c)
+            st.success(f"DC location saved: ({dc_lat:.6f}, {dc_lng:.6f})")
+        except Exception:
+            logger.exception("Failed to save DC location")
+            st.error("Could not save DC location.")
+
+    # --- Store Locations ---
+    st.divider()
+    st.header("Store Locations")
+    st.caption(
+        "Enter lat/lng for each store. Stores in each peddle run will be sequenced "
+        "by distance from the DC (furthest first by default)."
+    )
+
+    # Load existing locations
+    try:
+        with db_connection() as (conn, c):
+            existing_locs = load_store_locations(c)
+    except Exception:
+        logger.exception("Failed to load store locations")
+        existing_locs = {}
+
+    loc_data = []
+    for s in stores:
+        loc = existing_locs.get(s, (0.0, 0.0))
+        loc_data.append({"Store": s, "Latitude": loc[0], "Longitude": loc[1]})
+
+    loc_df = pd.DataFrame(loc_data)
+    edited_loc_df = st.data_editor(
+        loc_df,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            "Store": st.column_config.TextColumn("Store", disabled=True),
+            "Latitude": st.column_config.NumberColumn("Latitude", format="%.6f"),
+            "Longitude": st.column_config.NumberColumn("Longitude", format="%.6f"),
+        },
+        key="location_editor",
+    )
+
+    if st.button("Save Locations", key="save_locations_btn"):
+        loc_map = {}
+        for _, row in edited_loc_df.iterrows():
+            store = str(row["Store"]).strip()
+            lat = float(row["Latitude"]) if pd.notna(row["Latitude"]) else 0.0
+            lng = float(row["Longitude"]) if pd.notna(row["Longitude"]) else 0.0
+            if store and (lat != 0.0 or lng != 0.0):
+                loc_map[store] = (lat, lng)
+        try:
+            with db_connection() as (conn, c):
+                save_store_locations(loc_map, conn, c)
+            st.session_state["store_locations"] = loc_map
+            st.success(f"Saved locations for {len(loc_map)} stores.")
+        except Exception:
+            logger.exception("Failed to save store locations")
+            st.error("Could not save locations to database.")

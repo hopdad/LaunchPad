@@ -31,6 +31,8 @@ _SCHEMA = [
        (date TEXT, username TEXT, df_json TEXT NOT NULL,
         departments TEXT NOT NULL, updated_at TEXT NOT NULL,
         PRIMARY KEY (date, username))''',
+    '''CREATE TABLE IF NOT EXISTS store_locations
+       (store TEXT PRIMARY KEY, lat REAL NOT NULL, lng REAL NOT NULL)''',
 ]
 
 
@@ -192,6 +194,22 @@ def load_store_zones(c):
     """Return {store: zone} dict."""
     c.execute("SELECT store, zone FROM store_zones")
     return {row[0]: row[1] for row in c.fetchall()}
+
+
+# --- Store locations ---
+
+def save_store_locations(loc_map, conn, c):
+    """Persist a {store: (lat, lng)} mapping, replacing all existing rows."""
+    c.execute("DELETE FROM store_locations")
+    for store, (lat, lng) in loc_map.items():
+        c.execute("INSERT INTO store_locations VALUES (?, ?, ?)", (store, lat, lng))
+    conn.commit()
+
+
+def load_store_locations(c):
+    """Return {store: (lat, lng)} dict."""
+    c.execute("SELECT store, lat, lng FROM store_locations")
+    return {row[0]: (row[1], row[2]) for row in c.fetchall()}
 
 
 # --- Correction factor ---

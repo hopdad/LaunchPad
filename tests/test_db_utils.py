@@ -19,6 +19,8 @@ from db_utils import (
     save_draft,
     load_draft,
     delete_draft,
+    save_store_locations,
+    load_store_locations,
 )
 
 
@@ -527,3 +529,34 @@ class TestDrafts:
         c.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = {row[0] for row in c.fetchall()}
         assert "drafts" in tables
+
+
+# --- Store locations tests ---
+
+class TestStoreLocations:
+    def test_save_and_load_roundtrip(self, db):
+        conn, c = db
+        loc_map = {"100": (40.7128, -74.0060), "200": (33.9425, -118.4081)}
+        save_store_locations(loc_map, conn, c)
+        loaded = load_store_locations(c)
+        assert len(loaded) == 2
+        assert loaded["100"] == (40.7128, -74.0060)
+        assert loaded["200"] == (33.9425, -118.4081)
+
+    def test_load_empty(self, db):
+        _, c = db
+        assert load_store_locations(c) == {}
+
+    def test_save_replaces_all(self, db):
+        conn, c = db
+        save_store_locations({"100": (40.0, -74.0)}, conn, c)
+        save_store_locations({"200": (33.0, -118.0)}, conn, c)
+        loaded = load_store_locations(c)
+        assert "100" not in loaded
+        assert "200" in loaded
+
+    def test_creates_table(self, db):
+        conn, c = db
+        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in c.fetchall()}
+        assert "store_locations" in tables

@@ -4,9 +4,9 @@ import logging
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-from planning import auto_suggest_runs, extract_overs, auto_suggest_overs_runs
+from planning import auto_suggest_runs, extract_overs, auto_suggest_overs_runs, sequence_runs
 from summary import compute_summary
-from db_utils import db_connection, load_store_zones, fetch_correction_factor
+from db_utils import db_connection, load_store_zones, load_store_locations, fetch_correction_factor
 
 logger = logging.getLogger(__name__)
 
@@ -21,15 +21,19 @@ def render():
         st.info("No data yet. Go to Data Entry first.")
         return
 
-    # Load correction factor and zones
+    # Load correction factor, zones, and locations
     correction_factor = 1.0
     store_zones = {}
+    store_locations = {}
     try:
         with db_connection() as (conn, c):
             correction_factor = fetch_correction_factor(c)
             store_zones = load_store_zones(c)
+            store_locations = load_store_locations(c)
     except Exception:
-        logger.exception("Failed to load correction factor or zones")
+        logger.exception("Failed to load correction factor, zones, or locations")
+
+    dc_location = st.session_state.get("dc_location")
 
     try:
         s = compute_summary(df, fluff, trailer_capacity)
@@ -49,12 +53,30 @@ def render():
             st.write(f"**Adjusted Probable Trailers:** {adjusted_trailers}")
 
         st.header("Peddle Run Planning")
-        auto_suggest = st.checkbox("Auto-suggest Peddle Runs (FFD bin-packing)")
+        plan_col1, plan_col2 = st.columns([2, 2])
+        with plan_col1:
+            auto_suggest = st.checkbox("Auto-suggest Peddle Runs (FFD bin-packing)")
+        with plan_col2:
+            if store_locations and dc_location and dc_location != (0.0, 0.0):
+                sort_order = st.selectbox(
+                    "Stop Order",
+                    ["Furthest first", "Closest first"],
+                    key="stop_order_select",
+                )
+                order_key = "furthest_first" if sort_order == "Furthest first" else "closest_first"
+            else:
+                order_key = None
+                if not store_locations:
+                    st.caption("Set store locations in Settings to enable distance ordering.")
+                elif not dc_location or dc_location == (0.0, 0.0):
+                    st.caption("Set DC home base in Settings to enable distance ordering.")
 
         runs_df = pd.DataFrame()
         if auto_suggest:
             store_ready_times = st.session_state.get("store_ready_times") or {}
             runs = auto_suggest_runs(df, trailer_capacity, store_ready_times=store_ready_times)
+            if order_key:
+                sequence_runs(runs, store_locations, dc_location, order=order_key)
             runs_df = pd.DataFrame(runs)
             runs_df["Run"] = runs_df.index + 1
             runs_df["Time"] = ""
@@ -122,6 +144,8 @@ def render():
                 )
 
             overs_runs = auto_suggest_overs_runs(df, trailer_capacity, store_zones=store_zones)
+            if order_key and overs_runs:
+                sequence_runs(overs_runs, store_locations, dc_location, order=order_key)
             if overs_runs:
                 overs_runs_df = pd.DataFrame(overs_runs)
                 overs_runs_df.insert(0, "Run", range(1, len(overs_runs_df) + 1))
