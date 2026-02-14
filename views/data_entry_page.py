@@ -50,7 +50,7 @@ def render():
     if st.session_state.get("_entry_date") != entry_date:
         st.session_state["_entry_date"] = entry_date
 
-    entry_method = st.selectbox("Entry Method", ("Manual Entry", "Upload Image/Screenshot/PDF (OCR)", "Upload CSV"))
+    entry_method = st.selectbox("Entry Method", ("Upload Image/Screenshot/PDF (OCR)", "Manual Entry", "Upload CSV"))
 
     data = []
 
@@ -93,7 +93,10 @@ def render():
                     st.error("Error combining CSV data. Check file contents.")
 
     elif entry_method == "Upload Image/Screenshot/PDF (OCR)":
-        st.info("Upload one image/screenshot/PDF per department. Each file should contain store numbers and cube values.")
+        st.info(
+            "Upload one image/screenshot/PDF per department. "
+            "You can drag-and-drop files, or use your phone's camera to snap a photo."
+        )
         ocr_engine = st.selectbox("OCR Engine", ("EasyOCR", "Tesseract"))
 
         dept_data = {}
