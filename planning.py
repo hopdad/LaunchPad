@@ -1,4 +1,4 @@
-"""Peddle run planning logic (bin-packing)."""
+"""Peddle run planning logic (bin-packing + overs routing)."""
 
 import pandas as pd
 
@@ -71,3 +71,72 @@ def _ffd_pack(df, trailer_capacity):
         }
         for r in runs
     ]
+
+
+# --- Overs-based peddle run planning ---
+
+
+def extract_overs(df, trailer_capacity):
+    """Identify stores with overflow and return a DataFrame of overs.
+
+    Returns a DataFrame with columns: STORE, OVERS (the cube amount beyond
+    what fits on the direct trailer).  Only stores with TOTAL > trailer_capacity
+    are included.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["STORE", "OVERS"])
+
+    overs = df[df["TOTAL"] > trailer_capacity].copy()
+    if overs.empty:
+        return pd.DataFrame(columns=["STORE", "OVERS"])
+
+    overs = overs[["STORE", "TOTAL"]].copy()
+    overs["OVERS"] = overs["TOTAL"] - trailer_capacity
+    return overs[["STORE", "OVERS"]].reset_index(drop=True)
+
+
+def auto_suggest_overs_runs(df, trailer_capacity, store_zones=None):
+    """Generate peddle runs from overflow freight, grouped by zone.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain columns ``STORE`` and ``TOTAL``.
+    trailer_capacity : float
+        Maximum cube per trailer/run.
+    store_zones : dict | None
+        Mapping of store number (str) to zone name (str).
+        If ``None`` or empty, all overs go into a single pool.
+
+    Returns
+    -------
+    list[dict]
+        Each dict has keys: Stores, Total Cube, Second Trailer, Zone.
+    """
+    overs_df = extract_overs(df, trailer_capacity)
+    if overs_df.empty:
+        return []
+
+    # Build a df suitable for FFD packing (STORE + TOTAL columns)
+    pack_df = overs_df.rename(columns={"OVERS": "TOTAL"})
+
+    if not store_zones:
+        runs = _ffd_pack(pack_df, trailer_capacity)
+        for r in runs:
+            r["Zone"] = "Unzoned"
+        return runs
+
+    # Group by zone, pack each zone separately
+    pack_df = pack_df.copy()
+    pack_df["_zone"] = pack_df["STORE"].astype(str).map(
+        lambda s: store_zones.get(s, "Unzoned")
+    )
+
+    all_runs = []
+    for zone, group_df in sorted(pack_df.groupby("_zone"), key=lambda x: x[0]):
+        zone_runs = _ffd_pack(group_df, trailer_capacity)
+        for r in zone_runs:
+            r["Zone"] = zone
+        all_runs.extend(zone_runs)
+
+    return all_runs

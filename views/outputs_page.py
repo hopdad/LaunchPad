@@ -3,7 +3,7 @@
 import logging
 import streamlit as st
 from datetime import datetime
-from db_utils import db_connection, save_data_to_db
+from db_utils import db_connection, save_data_to_db, delete_draft
 from exports import generate_pdf, generate_excel
 from summary import compute_summary
 
@@ -41,8 +41,11 @@ def render():
 
     if st.button("Save to DB"):
         try:
+            username = st.session_state.get("username", "unknown")
             with db_connection() as (conn, c):
                 save_data_to_db(df, departments, runs_df, date, conn, c)
+                # Clean up the draft now that data is fully saved
+                delete_draft(date.strftime("%Y-%m-%d"), username, conn, c)
                 st.session_state["_last_saved"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.success("Data saved to database!")
         except Exception:

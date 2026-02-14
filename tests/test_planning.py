@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 
-from planning import auto_suggest_runs
+from planning import auto_suggest_runs, extract_overs, auto_suggest_overs_runs
 
 
 class TestAutoSuggestRuns:
@@ -131,3 +131,112 @@ class TestAutoSuggestRuns:
         runs_empty = auto_suggest_runs(df, trailer_capacity=1600, store_ready_times={})
         runs_default = auto_suggest_runs(df, trailer_capacity=1600)
         assert len(runs_none) == len(runs_empty) == len(runs_default) == 1
+
+
+# --- Overs extraction tests ---
+
+class TestExtractOvers:
+    def _make_df(self, stores_and_totals):
+        return pd.DataFrame([{"STORE": s, "TOTAL": t} for s, t in stores_and_totals])
+
+    def test_no_overs_when_all_fit(self):
+        df = self._make_df([("100", 500), ("200", 800)])
+        overs = extract_overs(df, trailer_capacity=1600)
+        assert len(overs) == 0
+
+    def test_overs_for_exceeding_store(self):
+        df = self._make_df([("100", 2000), ("200", 800)])
+        overs = extract_overs(df, trailer_capacity=1600)
+        assert len(overs) == 1
+        assert overs.iloc[0]["STORE"] == "100"
+        assert overs.iloc[0]["OVERS"] == 400  # 2000 - 1600
+
+    def test_multiple_stores_with_overs(self):
+        df = self._make_df([("100", 2000), ("200", 1800), ("300", 500)])
+        overs = extract_overs(df, trailer_capacity=1600)
+        assert len(overs) == 2
+        total_overs = overs["OVERS"].sum()
+        assert total_overs == 600  # 400 + 200
+
+    def test_exact_capacity_no_overs(self):
+        df = self._make_df([("100", 1600)])
+        overs = extract_overs(df, trailer_capacity=1600)
+        assert len(overs) == 0
+
+    def test_empty_df(self):
+        df = pd.DataFrame(columns=["STORE", "TOTAL"])
+        overs = extract_overs(df, trailer_capacity=1600)
+        assert len(overs) == 0
+
+    def test_overs_columns(self):
+        df = self._make_df([("100", 2000)])
+        overs = extract_overs(df, trailer_capacity=1600)
+        assert list(overs.columns) == ["STORE", "OVERS"]
+
+
+# --- Overs run generation tests ---
+
+class TestAutoSuggestOversRuns:
+    def _make_df(self, stores_and_totals):
+        return pd.DataFrame([{"STORE": s, "TOTAL": t} for s, t in stores_and_totals])
+
+    def test_no_runs_when_no_overs(self):
+        df = self._make_df([("100", 500), ("200", 800)])
+        runs = auto_suggest_overs_runs(df, trailer_capacity=1600)
+        assert runs == []
+
+    def test_single_store_overs_one_run(self):
+        df = self._make_df([("100", 2000)])
+        runs = auto_suggest_overs_runs(df, trailer_capacity=1600)
+        assert len(runs) == 1
+        assert runs[0]["Stores"] == "100"
+        assert runs[0]["Total Cube"] == 400  # only the overflow
+        assert runs[0]["Zone"] == "Unzoned"
+
+    def test_overs_grouped_by_zone(self):
+        df = self._make_df([("100", 2000), ("200", 1800), ("300", 1900)])
+        zones = {"100": "North", "200": "North", "300": "South"}
+        runs = auto_suggest_overs_runs(df, trailer_capacity=1600, store_zones=zones)
+        # North: 100 (400 overs) + 200 (200 overs) = 600 -> 1 run
+        # South: 300 (300 overs) -> 1 run
+        assert len(runs) == 2
+        north_runs = [r for r in runs if r["Zone"] == "North"]
+        south_runs = [r for r in runs if r["Zone"] == "South"]
+        assert len(north_runs) == 1
+        assert len(south_runs) == 1
+        assert north_runs[0]["Total Cube"] == 600
+        assert south_runs[0]["Total Cube"] == 300
+
+    def test_unzoned_stores_grouped_together(self):
+        df = self._make_df([("100", 2000), ("200", 1800)])
+        zones = {"100": "North"}  # 200 has no zone
+        runs = auto_suggest_overs_runs(df, trailer_capacity=1600, store_zones=zones)
+        assert len(runs) == 2
+        zones_in_runs = {r["Zone"] for r in runs}
+        assert "North" in zones_in_runs
+        assert "Unzoned" in zones_in_runs
+
+    def test_no_zones_all_in_one_pool(self):
+        df = self._make_df([("100", 2000), ("200", 1800)])
+        runs = auto_suggest_overs_runs(df, trailer_capacity=1600, store_zones=None)
+        # 400 + 200 = 600 overs, fits in one run
+        assert len(runs) == 1
+        assert runs[0]["Total Cube"] == 600
+        assert runs[0]["Zone"] == "Unzoned"
+
+    def test_overs_runs_have_required_keys(self):
+        df = self._make_df([("100", 2000)])
+        runs = auto_suggest_overs_runs(df, trailer_capacity=1600)
+        for run in runs:
+            assert "Stores" in run
+            assert "Total Cube" in run
+            assert "Second Trailer" in run
+            assert "Zone" in run
+
+    def test_large_overs_needs_second_trailer(self):
+        """If a single store's overs exceed trailer capacity, flag it."""
+        df = self._make_df([("100", 4000)])  # 2400 overs
+        runs = auto_suggest_overs_runs(df, trailer_capacity=1600)
+        assert len(runs) == 1
+        assert runs[0]["Total Cube"] == 2400
+        assert runs[0]["Second Trailer"] == "Yes"

@@ -4,8 +4,9 @@ import logging
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-from planning import auto_suggest_runs
+from planning import auto_suggest_runs, extract_overs, auto_suggest_overs_runs
 from summary import compute_summary
+from db_utils import db_connection, load_store_zones, fetch_correction_factor
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,16 @@ def render():
         st.info("No data yet. Go to Data Entry first.")
         return
 
+    # Load correction factor and zones
+    correction_factor = 1.0
+    store_zones = {}
+    try:
+        with db_connection() as (conn, c):
+            correction_factor = fetch_correction_factor(c)
+            store_zones = load_store_zones(c)
+    except Exception:
+        logger.exception("Failed to load correction factor or zones")
+
     try:
         s = compute_summary(df, fluff, trailer_capacity)
 
@@ -30,6 +41,12 @@ def render():
         st.write(f"**Pallet Count:** {s['pallet_count']}")
         st.write(f"**Trailer Goal:** {s['trailer_goal']:.2f}")
         st.write(f"**Probable Trailers:** {s['probable_trailers']}")
+
+        # Show correction factor when we have historical data
+        if correction_factor != 1.0:
+            adjusted_trailers = round(s['probable_trailers'] * correction_factor)
+            st.write(f"**Correction Factor:** {correction_factor:.2f}x (from actuals)")
+            st.write(f"**Adjusted Probable Trailers:** {adjusted_trailers}")
 
         st.header("Peddle Run Planning")
         auto_suggest = st.checkbox("Auto-suggest Peddle Runs (FFD bin-packing)")
@@ -80,6 +97,39 @@ def render():
             st.dataframe(runs_df)
 
         st.session_state["runs_df"] = runs_df
+
+        # --- Overs-Based Peddle Runs ---
+        st.divider()
+        st.header("Overs Peddle Runs")
+
+        overs_df = extract_overs(df, trailer_capacity)
+        if overs_df.empty:
+            st.info("No overs today — all stores fit within trailer capacity.")
+        else:
+            st.write(f"**{len(overs_df)} store(s) with overflow freight:**")
+            st.dataframe(
+                overs_df.rename(columns={"OVERS": "Overflow Cube"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+            total_overs = overs_df["OVERS"].sum()
+            st.write(f"**Total overflow cube:** {total_overs:.0f}")
+
+            if not store_zones:
+                st.warning(
+                    "No store zones configured. Overs will be grouped into a single pool. "
+                    "Assign zones in Settings to get route-optimized peddle runs."
+                )
+
+            overs_runs = auto_suggest_overs_runs(df, trailer_capacity, store_zones=store_zones)
+            if overs_runs:
+                overs_runs_df = pd.DataFrame(overs_runs)
+                overs_runs_df.insert(0, "Run", range(1, len(overs_runs_df) + 1))
+                st.write("**Suggested overs peddle runs:**")
+                st.dataframe(overs_runs_df, use_container_width=True, hide_index=True)
+                st.session_state["overs_runs_df"] = overs_runs_df
+            else:
+                st.session_state["overs_runs_df"] = pd.DataFrame()
     except Exception:
         logger.exception("Error in summary or planning")
         st.error("An error occurred computing the summary. Check your data.")
