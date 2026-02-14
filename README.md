@@ -1,4 +1,4 @@
-![LaunchPad](logo.jpg)
+![LaunchPad](logo.png)
 
 A web-based tool built with Streamlit to help manage daily shipping dock operations at a logistics/warehouse environment (specifically tailored for Meijer-style workflows).
 
