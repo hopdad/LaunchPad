@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import pandas as pd
@@ -26,6 +27,10 @@ _SCHEMA = [
        (key TEXT PRIMARY KEY, value TEXT)''',
     '''CREATE TABLE IF NOT EXISTS store_zones
        (store TEXT PRIMARY KEY, zone TEXT NOT NULL)''',
+    '''CREATE TABLE IF NOT EXISTS drafts
+       (date TEXT, username TEXT, df_json TEXT NOT NULL,
+        departments TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY (date, username))''',
 ]
 
 
@@ -131,6 +136,46 @@ def load_settings(c):
     """Return all saved settings as a plain dict (values JSON-decoded)."""
     c.execute("SELECT key, value FROM app_settings")
     return {row[0]: json.loads(row[1]) for row in c.fetchall()}
+
+
+# --- Drafts (auto-save in-progress data entry) ---
+
+def save_draft(date_str, username, df, departments, conn, c):
+    """Auto-save in-progress cube data so it can be resumed on any device."""
+    from datetime import datetime as _dt
+    df_json = df.to_json(orient="records")
+    depts_json = json.dumps(departments)
+    now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute(
+        "INSERT OR REPLACE INTO drafts VALUES (?, ?, ?, ?, ?)",
+        (date_str, username, df_json, depts_json, now),
+    )
+    conn.commit()
+
+
+def load_draft(date_str, username, c):
+    """Load a saved draft for the given date and user.
+
+    Returns (df, departments, updated_at) or (None, None, None) if no draft.
+    """
+    c.execute(
+        "SELECT df_json, departments, updated_at FROM drafts WHERE date = ? AND username = ?",
+        (date_str, username),
+    )
+    row = c.fetchone()
+    if not row:
+        return None, None, None
+    df = pd.read_json(io.StringIO(row[0]), orient="records")
+    if "STORE" in df.columns:
+        df["STORE"] = df["STORE"].astype(str)
+    departments = json.loads(row[1])
+    return df, departments, row[2]
+
+
+def delete_draft(date_str, username, conn, c):
+    """Remove a draft after data has been fully saved."""
+    c.execute("DELETE FROM drafts WHERE date = ? AND username = ?", (date_str, username))
+    conn.commit()
 
 
 # --- Store zones ---

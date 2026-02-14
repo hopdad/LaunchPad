@@ -16,6 +16,9 @@ from db_utils import (
     load_store_zones,
     fetch_correction_factor,
     fetch_per_store_correction,
+    save_draft,
+    load_draft,
+    delete_draft,
 )
 
 
@@ -435,3 +438,92 @@ class TestPerStoreCorrection:
         result = fetch_per_store_correction(c)
         assert "100" in result
         assert result["100"] == 2.0  # always used 2 trailers when projected 1
+
+
+# --- Draft save/load/delete tests ---
+
+class TestDrafts:
+    def _sample_df(self):
+        return pd.DataFrame([
+            {"STORE": "100", "882": 500.0, "883": 300.0, "TOTAL": 800.0, "DIFF": -800.0},
+            {"STORE": "200", "882": 150.0, "883": 250.0, "TOTAL": 400.0, "DIFF": -1200.0},
+        ])
+
+    def test_save_and_load_roundtrip(self, db):
+        conn, c = db
+        df = self._sample_df()
+        save_draft("2026-02-14", "clerk1", df, ["882", "883"], conn, c)
+
+        loaded_df, loaded_depts, updated_at = load_draft("2026-02-14", "clerk1", c)
+        assert loaded_df is not None
+        assert len(loaded_df) == 2
+        assert loaded_depts == ["882", "883"]
+        assert updated_at is not None
+        assert loaded_df.iloc[0]["STORE"] == "100"
+        assert loaded_df.iloc[0]["882"] == 500.0
+
+    def test_load_returns_none_when_no_draft(self, db):
+        conn, c = db
+        df, depts, updated = load_draft("2026-02-14", "clerk1", c)
+        assert df is None
+        assert depts is None
+        assert updated is None
+
+    def test_draft_keyed_by_date_and_user(self, db):
+        conn, c = db
+        df1 = pd.DataFrame([{"STORE": "100", "TOTAL": 500.0}])
+        df2 = pd.DataFrame([{"STORE": "200", "TOTAL": 900.0}])
+
+        save_draft("2026-02-14", "clerk1", df1, ["882"], conn, c)
+        save_draft("2026-02-14", "clerk2", df2, ["882"], conn, c)
+
+        loaded1, _, _ = load_draft("2026-02-14", "clerk1", c)
+        loaded2, _, _ = load_draft("2026-02-14", "clerk2", c)
+
+        assert loaded1.iloc[0]["STORE"] == "100"
+        assert loaded2.iloc[0]["STORE"] == "200"
+
+    def test_draft_upsert_replaces(self, db):
+        conn, c = db
+        df1 = pd.DataFrame([{"STORE": "100", "TOTAL": 500.0}])
+        df2 = pd.DataFrame([{"STORE": "100", "TOTAL": 999.0}])
+
+        save_draft("2026-02-14", "clerk1", df1, ["882"], conn, c)
+        save_draft("2026-02-14", "clerk1", df2, ["882"], conn, c)
+
+        loaded, _, _ = load_draft("2026-02-14", "clerk1", c)
+        assert loaded.iloc[0]["TOTAL"] == 999.0
+
+    def test_delete_draft(self, db):
+        conn, c = db
+        df = self._sample_df()
+        save_draft("2026-02-14", "clerk1", df, ["882", "883"], conn, c)
+
+        delete_draft("2026-02-14", "clerk1", conn, c)
+
+        loaded, _, _ = load_draft("2026-02-14", "clerk1", c)
+        assert loaded is None
+
+    def test_delete_only_affects_target(self, db):
+        conn, c = db
+        df = pd.DataFrame([{"STORE": "100", "TOTAL": 500.0}])
+
+        save_draft("2026-02-14", "clerk1", df, ["882"], conn, c)
+        save_draft("2026-02-14", "clerk2", df, ["882"], conn, c)
+        save_draft("2026-02-15", "clerk1", df, ["882"], conn, c)
+
+        delete_draft("2026-02-14", "clerk1", conn, c)
+
+        # clerk2's draft for same date still exists
+        loaded, _, _ = load_draft("2026-02-14", "clerk2", c)
+        assert loaded is not None
+
+        # clerk1's draft for different date still exists
+        loaded, _, _ = load_draft("2026-02-15", "clerk1", c)
+        assert loaded is not None
+
+    def test_creates_table(self, db):
+        conn, c = db
+        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in c.fetchall()}
+        assert "drafts" in tables

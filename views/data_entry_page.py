@@ -1,11 +1,23 @@
-"""Data Entry page — manual entry, CSV upload, or OCR."""
+"""Data Entry page — manual entry, CSV upload, or OCR (with auto-save)."""
 
 import logging
 import pandas as pd
 import streamlit as st
+from db_utils import db_connection, save_draft, load_draft, delete_draft
 from utils import parse_single_dept_ocr, run_ocr
 
 logger = logging.getLogger(__name__)
+
+
+def _auto_save(df, departments, entry_date):
+    """Silently persist the current DataFrame as a draft."""
+    username = st.session_state.get("username", "unknown")
+    date_str = entry_date.strftime("%Y-%m-%d") if hasattr(entry_date, "strftime") else str(entry_date)
+    try:
+        with db_connection() as (conn, c):
+            save_draft(date_str, username, df, departments, conn, c)
+    except Exception:
+        logger.exception("Auto-save draft failed")
 
 
 def render():
@@ -49,6 +61,30 @@ def render():
     )
     if st.session_state.get("_entry_date") != entry_date:
         st.session_state["_entry_date"] = entry_date
+        st.session_state.pop("_draft_dismissed", None)
+
+    # --- Check for saved draft ---
+    username = st.session_state.get("username", "unknown")
+    date_str = entry_date.strftime("%Y-%m-%d") if hasattr(entry_date, "strftime") else str(entry_date)
+    if st.session_state["df"].empty and not st.session_state.get("_draft_dismissed"):
+        try:
+            with db_connection() as (conn, c):
+                draft_df, draft_depts, draft_time = load_draft(date_str, username, c)
+            if draft_df is not None and not draft_df.empty:
+                st.info(f"Draft found from {draft_time}. Resume where you left off?")
+                resume_col, dismiss_col, _ = st.columns([1, 1, 4])
+                with resume_col:
+                    if st.button("Resume Draft", type="primary"):
+                        st.session_state["df"] = draft_df
+                        if draft_depts:
+                            st.session_state["departments"] = draft_depts
+                        st.rerun()
+                with dismiss_col:
+                    if st.button("Start Fresh"):
+                        st.session_state["_draft_dismissed"] = True
+                        st.rerun()
+        except Exception:
+            logger.exception("Error checking for draft")
 
     entry_method = st.selectbox("Entry Method", ("Upload Image/Screenshot/PDF (OCR)", "Manual Entry", "Upload CSV"))
 
@@ -181,3 +217,8 @@ def render():
             edited_df["TOTAL"] = edited_df[departments].sum(axis=1)
             edited_df["DIFF"] = edited_df["TOTAL"] - trailer_capacity
         st.session_state["df"] = edited_df
+
+    # --- Auto-save draft whenever we have data ---
+    if not st.session_state["df"].empty:
+        _auto_save(st.session_state["df"], departments, entry_date)
+        st.caption("Draft auto-saved.")
