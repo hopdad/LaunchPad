@@ -9,6 +9,8 @@ from db_utils import (
     fetch_historical_data,
     fetch_actuals_for_date,
     fetch_per_store_history,
+    fetch_correction_factor,
+    fetch_per_store_correction,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,40 @@ def render():
                 ).fillna(0)
                 if not pivot.empty:
                     st.line_chart(pivot)
+
+            # --- Correction Factors ---
+            st.divider()
+            st.subheader("Cube Estimation Accuracy")
+            correction = fetch_correction_factor(c)
+            if correction != 1.0:
+                delta_pct = (correction - 1.0) * 100
+                direction = "over" if correction > 1.0 else "under"
+                col1, col2 = st.columns(2)
+                col1.metric(
+                    "Overall Correction Factor",
+                    f"{correction:.2f}x",
+                    f"{delta_pct:+.0f}% (actuals run {direction})",
+                )
+                col2.caption(
+                    "A factor > 1.0 means actuals use more trailers than projected. "
+                    "This factor is automatically applied to future estimates."
+                )
+
+                # Per-store breakdown
+                store_corrections = fetch_per_store_correction(c)
+                if store_corrections:
+                    st.write("**Per-Store Bias** (stores with 3+ data points):")
+                    bias_df = pd.DataFrame([
+                        {"Store": s, "Factor": f"{f:.2f}x",
+                         "Bias": f"{(f-1)*100:+.0f}%"}
+                        for s, f in sorted(store_corrections.items())
+                    ])
+                    st.dataframe(bias_df, use_container_width=True, hide_index=True)
+            else:
+                st.info(
+                    "Not enough historical data yet to compute a correction factor. "
+                    "Enter actuals on the Actuals page after each shift to start building this."
+                )
 
     except Exception:
         logger.exception("Error fetching historical data")

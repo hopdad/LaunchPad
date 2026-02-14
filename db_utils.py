@@ -24,6 +24,8 @@ _SCHEMA = [
         PRIMARY KEY (date, run))''',
     '''CREATE TABLE IF NOT EXISTS app_settings
        (key TEXT PRIMARY KEY, value TEXT)''',
+    '''CREATE TABLE IF NOT EXISTS store_zones
+       (store TEXT PRIMARY KEY, zone TEXT NOT NULL)''',
 ]
 
 
@@ -129,3 +131,101 @@ def load_settings(c):
     """Return all saved settings as a plain dict (values JSON-decoded)."""
     c.execute("SELECT key, value FROM app_settings")
     return {row[0]: json.loads(row[1]) for row in c.fetchall()}
+
+
+# --- Store zones ---
+
+def save_store_zones(zone_map, conn, c):
+    """Persist a {store: zone} mapping, replacing all existing rows."""
+    c.execute("DELETE FROM store_zones")
+    for store, zone in zone_map.items():
+        c.execute("INSERT INTO store_zones VALUES (?, ?)", (store, zone))
+    conn.commit()
+
+
+def load_store_zones(c):
+    """Return {store: zone} dict."""
+    c.execute("SELECT store, zone FROM store_zones")
+    return {row[0]: row[1] for row in c.fetchall()}
+
+
+# --- Correction factor ---
+
+def fetch_correction_factor(c, lookback_days=30):
+    """Compute a cube correction multiplier from recent projected vs actual data.
+
+    Looks at the last *lookback_days* of data where both projections and actuals
+    exist.  Returns a float multiplier (e.g. 1.15 means actuals use 15% more
+    trailers than projected).  Returns 1.0 when there is insufficient data.
+    """
+    c.execute(
+        """
+        SELECT p.total_cube, p.second_trailer, a.actual_trailers
+        FROM peddle_runs p
+        JOIN actual_peddles a ON p.date = a.date AND p.run = a.run
+        WHERE p.date >= date('now', ?)
+        """,
+        (f"-{lookback_days} days",),
+    )
+    rows = c.fetchall()
+    if not rows:
+        return 1.0
+
+    total_projected_trailers = 0
+    total_actual_trailers = 0
+    for total_cube, second_trailer, actual_trailers in rows:
+        projected = 2 if second_trailer == "Yes" else 1
+        total_projected_trailers += projected
+        total_actual_trailers += actual_trailers
+
+    if total_projected_trailers == 0:
+        return 1.0
+
+    return total_actual_trailers / total_projected_trailers
+
+
+def fetch_per_store_correction(c, lookback_days=30):
+    """Compute per-store cube bias from historical data.
+
+    Returns {store: multiplier} where multiplier > 1 means the store
+    consistently uses more trailers than projected.
+    Only includes stores with at least 3 data points.
+    """
+    c.execute(
+        """
+        SELECT p.stores, p.total_cube, p.second_trailer, a.actual_trailers
+        FROM peddle_runs p
+        JOIN actual_peddles a ON p.date = a.date AND p.run = a.run
+        WHERE p.date >= date('now', ?)
+        """,
+        (f"-{lookback_days} days",),
+    )
+    rows = c.fetchall()
+    if not rows:
+        return {}
+
+    # Accumulate per-store projected vs actual (split evenly across run stores)
+    from collections import defaultdict
+    store_proj = defaultdict(list)
+    store_actual = defaultdict(list)
+    for stores_str, total_cube, second_trailer, actual_trailers in rows:
+        stores = [s.strip() for s in stores_str.replace(",", "/").split("/") if s.strip()]
+        if not stores:
+            continue
+        projected = 2.0 if second_trailer == "Yes" else 1.0
+        share_proj = projected / len(stores)
+        share_actual = actual_trailers / len(stores)
+        for s in stores:
+            store_proj[s].append(share_proj)
+            store_actual[s].append(share_actual)
+
+    result = {}
+    for store in store_proj:
+        if len(store_proj[store]) < 3:
+            continue
+        sum_proj = sum(store_proj[store])
+        sum_actual = sum(store_actual[store])
+        if sum_proj > 0:
+            result[store] = sum_actual / sum_proj
+
+    return result

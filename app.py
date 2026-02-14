@@ -5,7 +5,7 @@ st.set_page_config(page_title="Peddle Sheet Generator", layout="wide")
 
 import pandas as pd
 import streamlit_authenticator as stauth
-from db_utils import db_connection, load_settings
+from db_utils import db_connection, load_settings, load_store_zones
 
 # Pages (directory named "views" to avoid Streamlit auto-detection)
 from views import (
@@ -95,6 +95,12 @@ if "departments" not in st.session_state:
     st.session_state["store_ready_times"] = _saved.get("store_ready_times", {})
     st.session_state["trailer_capacity"] = _saved.get("trailer_capacity", 1600)
     st.session_state["fluff"] = _saved.get("fluff", 200)
+    try:
+        with db_connection() as (conn, c):
+            st.session_state["store_zones"] = load_store_zones(c)
+    except Exception:
+        logger.exception("Failed to load store zones")
+        st.session_state["store_zones"] = {}
 if "df" not in st.session_state:
     st.session_state["df"] = pd.DataFrame()
 if "runs_df" not in st.session_state:

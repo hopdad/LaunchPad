@@ -12,6 +12,10 @@ from db_utils import (
     save_actual_peddles,
     save_settings,
     load_settings,
+    save_store_zones,
+    load_store_zones,
+    fetch_correction_factor,
+    fetch_per_store_correction,
 )
 
 
@@ -318,3 +322,116 @@ class TestSettings:
         loaded = load_settings(c)
         assert loaded["stores"] == ["100"]
         assert loaded["fluff"] == 300
+
+
+# --- Store zones tests ---
+
+class TestStoreZones:
+    def test_save_and_load_roundtrip(self, db):
+        conn, c = db
+        zones = {"100": "North", "200": "South", "300": "North"}
+        save_store_zones(zones, conn, c)
+        loaded = load_store_zones(c)
+        assert loaded == zones
+
+    def test_load_empty(self, db):
+        conn, c = db
+        loaded = load_store_zones(c)
+        assert loaded == {}
+
+    def test_save_replaces_all(self, db):
+        conn, c = db
+        save_store_zones({"100": "North", "200": "South"}, conn, c)
+        save_store_zones({"300": "East"}, conn, c)
+        loaded = load_store_zones(c)
+        assert loaded == {"300": "East"}  # old entries replaced
+
+    def test_creates_table(self, db):
+        conn, c = db
+        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in c.fetchall()}
+        assert "store_zones" in tables
+
+
+# --- Correction factor tests ---
+
+class TestCorrectionFactor:
+    def _insert_run_and_actual(self, c, conn, date, run, total_cube, second_trailer, actual_trailers):
+        c.execute(
+            "INSERT INTO peddle_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (date, run, "06:00", "100", "Standard", total_cube, second_trailer, ""),
+        )
+        c.execute(
+            "INSERT INTO actual_peddles VALUES (?, ?, ?, ?)",
+            (date, run, actual_trailers, ""),
+        )
+        conn.commit()
+
+    def test_returns_1_when_no_data(self, db):
+        conn, c = db
+        assert fetch_correction_factor(c) == 1.0
+
+    def test_exact_match_returns_1(self, db):
+        conn, c = db
+        today = datetime.today().strftime("%Y-%m-%d")
+        self._insert_run_and_actual(c, conn, today, 1, 1500, "No", 1)
+        assert fetch_correction_factor(c) == 1.0
+
+    def test_actuals_higher_returns_above_1(self, db):
+        conn, c = db
+        today = datetime.today().strftime("%Y-%m-%d")
+        # Projected 1 trailer, actually used 2
+        self._insert_run_and_actual(c, conn, today, 1, 1500, "No", 2)
+        assert fetch_correction_factor(c) == 2.0
+
+    def test_actuals_lower_returns_below_1(self, db):
+        conn, c = db
+        today = datetime.today().strftime("%Y-%m-%d")
+        # Projected 2 trailers (second_trailer=Yes), actually used 1
+        self._insert_run_and_actual(c, conn, today, 1, 2000, "Yes", 1)
+        assert fetch_correction_factor(c) == 0.5
+
+    def test_multiple_runs_averaged(self, db):
+        conn, c = db
+        today = datetime.today().strftime("%Y-%m-%d")
+        # Run 1: projected 1, actual 2 ; Run 2: projected 1, actual 1
+        self._insert_run_and_actual(c, conn, today, 1, 1500, "No", 2)
+        self._insert_run_and_actual(c, conn, today, 2, 1000, "No", 1)
+        # total_projected=2, total_actual=3 -> 1.5
+        assert fetch_correction_factor(c) == 1.5
+
+
+class TestPerStoreCorrection:
+    def _insert_run_and_actual(self, c, conn, date, run, stores, total_cube, second_trailer, actual_trailers):
+        c.execute(
+            "INSERT INTO peddle_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (date, run, "06:00", stores, "Standard", total_cube, second_trailer, ""),
+        )
+        c.execute(
+            "INSERT INTO actual_peddles VALUES (?, ?, ?, ?)",
+            (date, run, actual_trailers, ""),
+        )
+        conn.commit()
+
+    def test_returns_empty_when_no_data(self, db):
+        conn, c = db
+        assert fetch_per_store_correction(c) == {}
+
+    def test_needs_minimum_3_data_points(self, db):
+        conn, c = db
+        today = datetime.today().strftime("%Y-%m-%d")
+        # Only 2 data points
+        self._insert_run_and_actual(c, conn, today, 1, "100", 1500, "No", 1)
+        self._insert_run_and_actual(c, conn, today, 2, "100", 1500, "No", 1)
+        result = fetch_per_store_correction(c)
+        assert "100" not in result
+
+    def test_returns_factor_with_enough_data(self, db):
+        conn, c = db
+        # 3 data points for store 100
+        for i, day in enumerate(range(1, 4)):
+            date = f"2026-02-{day:02d}"
+            self._insert_run_and_actual(c, conn, date, 1, "100", 1500, "No", 2)
+        result = fetch_per_store_correction(c)
+        assert "100" in result
+        assert result["100"] == 2.0  # always used 2 trailers when projected 1
